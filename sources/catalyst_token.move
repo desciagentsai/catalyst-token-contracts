@@ -1,20 +1,17 @@
-/// Catalyst Token (CATL) - Main token contract
-/// Total Supply: 100,000,000 CATL
-/// Fixed supply with no inflation
 #[allow(unused_const)]
 module catalyst::catalyst_token {
     use sui::coin::{Self, Coin, TreasuryCap};
     use sui::coin_registry;
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+    use sui::object::{Self, UID};
 
-    /// One-Time-Witness for the token
     public struct CATALYST_TOKEN has drop {}
 
-    /// Admin capability for managing token operations
     public struct AdminCap has key, store {
         id: UID
     }
 
-    /// Token configuration and state
     public struct TokenConfig has key {
         id: UID,
         total_supply: u64,
@@ -23,40 +20,32 @@ module catalyst::catalyst_token {
         treasury_address: address
     }
 
-    /// Error codes
     const E_PAUSED: u64 = 1;
     const E_NOT_ADMIN: u64 = 2;
     const E_INVALID_AMOUNT: u64 = 3;
     const E_INSUFFICIENT_SUPPLY: u64 = 4;
 
-    /// Total supply: 100 million CATL (with 9 decimals)
     const TOTAL_SUPPLY: u64 = 100_000_000_000_000_000;
 
-    /// Initialize the CATL token
-    /// This is called automatically on publish
     fun init(witness: CATALYST_TOKEN, ctx: &mut TxContext) {
-        // Create the currency using coin_registry (replaces deprecated coin::create_currency)
         let (currency, treasury_cap) = coin_registry::new_currency_with_otw(
             witness,
-            9, // decimals
+            9,
             b"CATL".to_string(),
             b"Catalyst".to_string(),
             b"Catalyst Token - DeSci Innovation Platform".to_string(),
-            b"".to_string(),
+            b"https://app.descilaunch.xyz/logo-preview.jpg".to_string(),
             ctx
         );
 
-        // Finalize currency registration (creates shared Currency object)
         let metadata_cap = currency.finalize(ctx);
 
         let sender = ctx.sender();
 
-        // Create admin capability
         let admin_cap = AdminCap {
             id: object::new(ctx)
         };
 
-        // Create token configuration
         let config = TokenConfig {
             id: object::new(ctx),
             total_supply: TOTAL_SUPPLY,
@@ -65,21 +54,14 @@ module catalyst::catalyst_token {
             treasury_address: sender
         };
 
-        // Share the config object
         transfer::share_object(config);
-
-        // Transfer admin cap to deployer
         transfer::transfer(admin_cap, sender);
-
-        // Transfer treasury cap to deployer (for minting)
         transfer::public_transfer(treasury_cap, sender);
-
-        // Transfer metadata cap to deployer
         transfer::public_transfer(metadata_cap, sender);
     }
 
-    /// Mint tokens (only called during initial distribution)
-    public fun mint(
+    /// ✅ FIXED: now callable from UI
+    public entry fun mint(
         treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
         config: &mut TokenConfig,
         amount: u64,
@@ -95,8 +77,7 @@ module catalyst::catalyst_token {
         transfer::public_transfer(coins, recipient);
     }
 
-    /// Burn tokens (reduce circulating supply)
-    public fun burn(
+    public entry fun burn(
         treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
         config: &mut TokenConfig,
         coin_to_burn: Coin<CATALYST_TOKEN>
@@ -106,24 +87,21 @@ module catalyst::catalyst_token {
         coin::burn(treasury_cap, coin_to_burn);
     }
 
-    /// Pause token operations (emergency)
-    public fun pause(
+    public entry fun pause(
         _admin: &AdminCap,
         config: &mut TokenConfig
     ) {
         config.paused = true;
     }
 
-    /// Resume token operations
-    public fun unpause(
+    public entry fun unpause(
         _admin: &AdminCap,
         config: &mut TokenConfig
     ) {
         config.paused = false;
     }
 
-    /// Update treasury address
-    public fun update_treasury(
+    public entry fun update_treasury(
         _admin: &AdminCap,
         config: &mut TokenConfig,
         new_treasury: address
@@ -131,7 +109,6 @@ module catalyst::catalyst_token {
         config.treasury_address = new_treasury;
     }
 
-    /// View functions
     public fun total_supply(config: &TokenConfig): u64 {
         config.total_supply
     }
