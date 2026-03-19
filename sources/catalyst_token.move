@@ -39,10 +39,10 @@ module catalyst::catalyst_token {
         let (currency, treasury_cap) = coin_registry::new_currency_with_otw(
             witness,
             9, // decimals
-            b\"CATL\".to_string(),
-            b\"Catalyst\".to_string(),
-            b\"Catalyst Token - DeSci Innovation Platform\".to_string(),
-            b\"\".to_string(),
+            b"CATL".to_string(),
+            b"Catalyst".to_string(),
+            b"Catalyst Token - DeSci Innovation Platform".to_string(),
+            b"".to_string(),
             ctx
         );
 
