@@ -46,11 +46,11 @@ fi
 
 # Mint 100M tokens (with 9 decimals = 100_000_000_000_000_000)
 echo "Minting tokens for vesting contract..."
-sui client call \
-    --package $PACKAGE_ID \
-    --module catalyst_token \
-    --function mint \
-    --args $TREASURY_CAP $TOKEN_CONFIG 100000000000000000 $ACTIVE_ADDRESS \
+sui client call 
+    --package $PACKAGE_ID 
+    --module catalyst_token 
+    --function mint 
+    --args $TREASURY_CAP $TOKEN_CONFIG 100000000000000000 $ACTIVE_ADDRESS 
     --gas-budget 100000000
 
 if [ $? -ne 0 ]; then
@@ -67,11 +67,11 @@ echo "Step 3: Creating swap pools..."
 echo "Creating CATL/SUI liquidity pool..."
 read -p "Enter SwapAdmin Object ID: " SWAP_ADMIN
 
-sui client call \
-    --package $PACKAGE_ID \
-    --module catalyst_swap \
-    --function create_catl_sui_pool \
-    --args $SWAP_ADMIN \
+sui client call 
+    --package $PACKAGE_ID 
+    --module catalyst_swap 
+    --function create_catl_sui_pool 
+    --args $SWAP_ADMIN 
     --gas-budget 50000000
 
 echo ""
@@ -83,11 +83,11 @@ read -p "Enter Clock Object ID (0x6): " CLOCK
 
 CLOCK=${CLOCK:-0x6}
 
-sui client call \
-    --package $PACKAGE_ID \
-    --module catalyst_vesting \
-    --function initialize_schedules \
-    --args $VESTING_ADMIN $VESTING_VAULT $CATL_COIN $CLOCK \
+sui client call 
+    --package $PACKAGE_ID 
+    --module catalyst_vesting 
+    --function initialize_schedules 
+    --args $VESTING_ADMIN $VESTING_VAULT $CATL_COIN $CLOCK 
     --gas-budget 100000000
 
 if [ $? -ne 0 ]; then
