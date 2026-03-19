@@ -1,12 +1,10 @@
 /// Catalyst Vesting Contract
 /// Manages token vesting for different allocation categories
 /// All released tokens are sent to treasury for disbursement
+#[allow(unused_const)]
 module catalyst::catalyst_vesting {
-    use sui::coin::{Self, Coin, TreasuryCap};
-    use sui::transfer;
-    use sui::tx_context::{Self, TxContext};
+    use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
-    use sui::object::{Self, UID};
     use sui::clock::{Self, Clock};
     use sui::table::{Self, Table};
     use catalyst::catalyst_token::CATALYST_TOKEN;
@@ -35,12 +33,12 @@ module catalyst::catalyst_vesting {
     const MONTH_MS: u64 = 2_592_000_000; // 30 days
 
     /// Admin capability
-    struct VestingAdmin has key, store {
+    public struct VestingAdmin has key, store {
         id: UID
     }
 
     /// Individual vesting schedule
-    struct VestingSchedule has store {
+    public struct VestingSchedule has store {
         category: u8,
         schedule_type: u8,
         total_amount: u64,
@@ -52,7 +50,7 @@ module catalyst::catalyst_vesting {
     }
 
     /// Global vesting vault
-    struct VestingVault has key {
+    public struct VestingVault has key {
         id: UID,
         schedules: Table<u8, VestingSchedule>,
         locked_balance: Balance<CATALYST_TOKEN>,
@@ -71,31 +69,31 @@ module catalyst::catalyst_vesting {
             id: object::new(ctx),
             schedules: table::new(ctx),
             locked_balance: balance::zero(),
-            treasury_address: tx_context::sender(ctx),
+            treasury_address: ctx.sender(),
             initialized: false,
             paused: false
         };
 
         transfer::share_object(vault);
-        transfer::transfer(admin, tx_context::sender(ctx));
+        transfer::transfer(admin, ctx.sender());
     }
 
     /// Initialize all vesting schedules with token allocations
     /// Must be called once after deployment with all tokens
-    public entry fun initialize_schedules(
+    public fun initialize_schedules(
         _admin: &VestingAdmin,
         vault: &mut VestingVault,
         tokens: Coin<CATALYST_TOKEN>,
         clock: &Clock,
-        ctx: &mut TxContext
+        _ctx: &mut TxContext
     ) {
         assert!(!vault.initialized, E_ALREADY_INITIALIZED);
-        
+
         let current_time = clock::timestamp_ms(clock);
-        let total_amount = coin::value(&tokens);
-        
+        let _total_amount = coin::value(&tokens);
+
         // Expected: 100M CATL with 9 decimals = 100_000_000_000_000_000
-        
+
         // Add tokens to vault
         let token_balance = coin::into_balance(tokens);
         balance::join(&mut vault.locked_balance, token_balance);
@@ -195,22 +193,20 @@ module catalyst::catalyst_vesting {
 
         // During vesting period
         let vesting_elapsed = time_elapsed - schedule.cliff_duration;
-        
+
         if (schedule.schedule_type == SCHEDULE_LINEAR || schedule.schedule_type == SCHEDULE_CLIFF_VEST) {
             // Linear vesting
-            let unlocked = (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration;
-            unlocked
+            (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration
         } else if (schedule.schedule_type == SCHEDULE_EMISSION) {
             // Emission-based (linear for now, can be customized)
-            let unlocked = (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration;
-            unlocked
+            (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration
         } else {
             0
         }
     }
 
     /// Release unlocked tokens for a specific category to treasury
-    public entry fun release_category(
+    public fun release_category(
         vault: &mut VestingVault,
         category: u8,
         clock: &Clock,
@@ -238,7 +234,7 @@ module catalyst::catalyst_vesting {
     }
 
     /// Release all unlocked tokens from all categories
-    public entry fun release_all(
+    public fun release_all(
         vault: &mut VestingVault,
         clock: &Clock,
         ctx: &mut TxContext
@@ -256,13 +252,13 @@ module catalyst::catalyst_vesting {
             CATEGORY_STRATEGIC
         ];
 
-        let i = 0;
-        let total_released = 0u64;
-        
+        let mut i = 0;
+        let mut total_released = 0u64;
+
         while (i < 6) {
             let category = *vector::borrow(&categories, i);
             let schedule = table::borrow_mut(&mut vault.schedules, category);
-            
+
             let unlocked_total = calculate_unlocked(schedule, current_time);
             let releasable = unlocked_total - schedule.released_amount;
 
@@ -284,7 +280,7 @@ module catalyst::catalyst_vesting {
     }
 
     /// Update treasury address
-    public entry fun update_treasury(
+    public fun update_treasury(
         _admin: &VestingAdmin,
         vault: &mut VestingVault,
         new_treasury: address
@@ -293,7 +289,7 @@ module catalyst::catalyst_vesting {
     }
 
     /// Pause vesting releases (emergency)
-    public entry fun pause(
+    public fun pause(
         _admin: &VestingAdmin,
         vault: &mut VestingVault
     ) {
@@ -301,7 +297,7 @@ module catalyst::catalyst_vesting {
     }
 
     /// Resume vesting releases
-    public entry fun unpause(
+    public fun unpause(
         _admin: &VestingAdmin,
         vault: &mut VestingVault
     ) {
@@ -331,7 +327,7 @@ module catalyst::catalyst_vesting {
         } else {
             0
         };
-        
+
         (
             schedule.total_amount,
             schedule.released_amount,

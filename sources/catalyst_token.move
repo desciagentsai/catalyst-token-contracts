@@ -1,23 +1,21 @@
 /// Catalyst Token (CATL) - Main token contract
 /// Total Supply: 100,000,000 CATL
 /// Fixed supply with no inflation
+#[allow(unused_const)]
 module catalyst::catalyst_token {
     use sui::coin::{Self, Coin, TreasuryCap};
-    use sui::transfer;
-    use sui::tx_context::{Self, TxContext};
-    use sui::balance::{Self, Balance};
-    use sui::object::{Self, UID};
+    use sui::coin_registry;
 
     /// One-Time-Witness for the token
-    struct CATALYST_TOKEN has drop {}
+    public struct CATALYST_TOKEN has drop {}
 
     /// Admin capability for managing token operations
-    struct AdminCap has key, store {
+    public struct AdminCap has key, store {
         id: UID
     }
 
     /// Token configuration and state
-    struct TokenConfig has key {
+    public struct TokenConfig has key {
         id: UID,
         total_supply: u64,
         circulating_supply: u64,
@@ -37,19 +35,21 @@ module catalyst::catalyst_token {
     /// Initialize the CATL token
     /// This is called automatically on publish
     fun init(witness: CATALYST_TOKEN, ctx: &mut TxContext) {
-        // Create the currency
-        let (treasury_cap, metadata) = coin::create_currency(
+        // Create the currency using coin_registry (replaces deprecated coin::create_currency)
+        let (currency, treasury_cap) = coin_registry::new_currency_with_otw(
             witness,
             9, // decimals
-            b"CATL",
-            b"Catalyst",
-            b"Catalyst Token - DeSci Innovation Platform",
-            option::none(),
+            b\"CATL\".to_string(),
+            b\"Catalyst\".to_string(),
+            b\"Catalyst Token - DeSci Innovation Platform\".to_string(),
+            b\"\".to_string(),
             ctx
         );
 
-        // Freeze the metadata (immutable token info)
-        transfer::public_freeze_object(metadata);
+        // Finalize currency registration (creates shared Currency object)
+        let metadata_cap = currency.finalize(ctx);
+
+        let sender = ctx.sender();
 
         // Create admin capability
         let admin_cap = AdminCap {
@@ -62,21 +62,24 @@ module catalyst::catalyst_token {
             total_supply: TOTAL_SUPPLY,
             circulating_supply: 0,
             paused: false,
-            treasury_address: tx_context::sender(ctx)
+            treasury_address: sender
         };
 
         // Share the config object
         transfer::share_object(config);
 
         // Transfer admin cap to deployer
-        transfer::transfer(admin_cap, tx_context::sender(ctx));
+        transfer::transfer(admin_cap, sender);
 
         // Transfer treasury cap to deployer (for minting)
-        transfer::public_transfer(treasury_cap, tx_context::sender(ctx));
+        transfer::public_transfer(treasury_cap, sender);
+
+        // Transfer metadata cap to deployer
+        transfer::public_transfer(metadata_cap, sender);
     }
 
     /// Mint tokens (only called during initial distribution)
-    public entry fun mint(
+    public fun mint(
         treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
         config: &mut TokenConfig,
         amount: u64,
@@ -88,12 +91,12 @@ module catalyst::catalyst_token {
 
         let coins = coin::mint(treasury_cap, amount, ctx);
         config.circulating_supply = config.circulating_supply + amount;
-        
+
         transfer::public_transfer(coins, recipient);
     }
 
     /// Burn tokens (reduce circulating supply)
-    public entry fun burn(
+    public fun burn(
         treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
         config: &mut TokenConfig,
         coin_to_burn: Coin<CATALYST_TOKEN>
@@ -104,7 +107,7 @@ module catalyst::catalyst_token {
     }
 
     /// Pause token operations (emergency)
-    public entry fun pause(
+    public fun pause(
         _admin: &AdminCap,
         config: &mut TokenConfig
     ) {
@@ -112,7 +115,7 @@ module catalyst::catalyst_token {
     }
 
     /// Resume token operations
-    public entry fun unpause(
+    public fun unpause(
         _admin: &AdminCap,
         config: &mut TokenConfig
     ) {
@@ -120,7 +123,7 @@ module catalyst::catalyst_token {
     }
 
     /// Update treasury address
-    public entry fun update_treasury(
+    public fun update_treasury(
         _admin: &AdminCap,
         config: &mut TokenConfig,
         new_treasury: address
