@@ -1,12 +1,12 @@
 #[allow(unused_const)]
-module catalyst::catalyst_token {
+module catalyst::catl {
     use sui::coin::{Self, Coin, TreasuryCap};
     use sui::coin_registry;
     use sui::tx_context::{Self, TxContext};
     use sui::transfer;
     use sui::object::{Self, UID};
 
-    public struct CATALYST_TOKEN has drop {}
+    public struct CATL has drop {}
 
     public struct AdminCap has key, store {
         id: UID
@@ -27,14 +27,14 @@ module catalyst::catalyst_token {
 
     const TOTAL_SUPPLY: u64 = 100_000_000_000_000_000;
 
-    fun init(witness: CATALYST_TOKEN, ctx: &mut TxContext) {
+    fun init(witness: CATL, ctx: &mut TxContext) {
         let (currency, treasury_cap) = coin_registry::new_currency_with_otw(
             witness,
             9,
             b"CATL".to_string(),
             b"Catalyst".to_string(),
             b"Catalyst Token - DeSci Innovation Platform".to_string(),
-            b"https://app.descilaunch.xyz/logo-preview.jpg".to_string(),
+            b"https://app.descilaunch.xyz/favicon.ico".to_string(),
             ctx
         );
 
@@ -60,9 +60,8 @@ module catalyst::catalyst_token {
         transfer::public_transfer(metadata_cap, sender);
     }
 
-    /// ✅ FIXED: now callable from UI
     public entry fun mint(
-        treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
+        treasury_cap: &mut TreasuryCap<CATL>,
         config: &mut TokenConfig,
         amount: u64,
         recipient: address,
@@ -78,9 +77,9 @@ module catalyst::catalyst_token {
     }
 
     public entry fun burn(
-        treasury_cap: &mut TreasuryCap<CATALYST_TOKEN>,
+        treasury_cap: &mut TreasuryCap<CATL>,
         config: &mut TokenConfig,
-        coin_to_burn: Coin<CATALYST_TOKEN>
+        coin_to_burn: Coin<CATL>
     ) {
         let amount = coin::value(&coin_to_burn);
         config.circulating_supply = config.circulating_supply - amount;
