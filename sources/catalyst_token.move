@@ -5,6 +5,7 @@ module catalyst::catl {
     use sui::tx_context::{Self, TxContext};
     use sui::transfer;
     use sui::object::{Self, UID};
+    use std::string::String; 
 
     public struct CATL has drop {}
 
@@ -122,5 +123,36 @@ module catalyst::catl {
 
     public fun treasury_address(config: &TokenConfig): address {
         config.treasury_address
+    }
+
+    // ======== Metadata Update Functions (via coin_registry) ========  // <-- NEW
+
+    /// Update the icon URL for CATL token.
+    /// Requires MetadataCap<CATL> (transferred to deployer during init)
+    /// and the shared Currency<CATL> object (available after finalize_registration).
+    public entry fun update_icon_url(
+        currency: &mut coin_registry::Currency<CATL>,
+        metadata_cap: &coin_registry::MetadataCap<CATL>,
+        new_icon_url: String,
+    ) {
+        coin_registry::set_icon_url(currency, metadata_cap, new_icon_url);
+    }
+
+    /// Update the name of the CATL token.
+    public entry fun update_name(
+        currency: &mut coin_registry::Currency<CATL>,
+        metadata_cap: &coin_registry::MetadataCap<CATL>,
+        new_name: String,
+    ) {
+        coin_registry::set_name(currency, metadata_cap, new_name);
+    }
+
+    /// Update the description of the CATL token.
+    public entry fun update_description(
+        currency: &mut coin_registry::Currency<CATL>,
+        metadata_cap: &coin_registry::MetadataCap<CATL>,
+        new_description: String,
+    ) {
+        coin_registry::set_description(currency, metadata_cap, new_description);
     }
 }
