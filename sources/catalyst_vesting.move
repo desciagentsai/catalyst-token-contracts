@@ -7,7 +7,7 @@ module catalyst::catalyst_vesting {
     use sui::balance::{Self, Balance};
     use sui::clock::{Self, Clock};
     use sui::table::{Self, Table};
-    use catalyst::catalyst_token::CATALYST_TOKEN;
+    use catalyst::catl::CATL;
 
     /// Vesting schedule types
     const SCHEDULE_LINEAR: u8 = 0;
@@ -53,7 +53,7 @@ module catalyst::catalyst_vesting {
     public struct VestingVault has key {
         id: UID,
         schedules: Table<u8, VestingSchedule>,
-        locked_balance: Balance<CATALYST_TOKEN>,
+        locked_balance: Balance<CATL>,
         treasury_address: address,
         initialized: bool,
         paused: bool
@@ -83,7 +83,7 @@ module catalyst::catalyst_vesting {
     public fun initialize_schedules(
         _admin: &VestingAdmin,
         vault: &mut VestingVault,
-        tokens: Coin<CATALYST_TOKEN>,
+        tokens: Coin<CATL>,
         clock: &Clock,
         _ctx: &mut TxContext
     ) {
