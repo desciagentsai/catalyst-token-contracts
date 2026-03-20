@@ -34,7 +34,7 @@ module catalyst::catl {
             b"CATL".to_string(),
             b"Catalyst".to_string(),
             b"Catalyst Token - DeSci Innovation Platform".to_string(),
-            b"https://app.descilaunch.xyz/favicon.ico".to_string(),
+            b"https://app.descilaunch.xyz/catl-wallet-icon.png".to_string(),
             ctx
         );
 
