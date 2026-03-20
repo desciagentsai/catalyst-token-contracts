@@ -48,7 +48,7 @@ fi
 echo "Minting tokens for vesting contract..."
 sui client call 
     --package $PACKAGE_ID 
-    --module catalyst_token 
+    --module CATL
     --function mint 
     --args $TREASURY_CAP $TOKEN_CONFIG 100000000000000000 $ACTIVE_ADDRESS 
     --gas-budget 100000000
