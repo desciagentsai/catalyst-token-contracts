@@ -6,7 +6,7 @@ module catalyst::catalyst_swap {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance, Supply};
     use sui::sui::SUI;
-    use catalyst::catalyst_token::CATALYST_TOKEN;
+    use catalyst::catl::CATL;
 
     /// LP Token for liquidity providers
     public struct LP_TOKEN has drop {}
@@ -33,7 +33,7 @@ module catalyst::catalyst_swap {
     /// Liquidity Pool for CATL/SUI pair
     public struct LiquidityPool_CATL_SUI has key {
         id: UID,
-        catl_reserve: Balance<CATALYST_TOKEN>,
+        catl_reserve: Balance<CATL>,
         sui_reserve: Balance<SUI>,
         lp_supply: Supply<LP_TOKEN>,
         locked_lp: Balance<LP_TOKEN>,
@@ -44,7 +44,7 @@ module catalyst::catalyst_swap {
     /// Note: In production, replace GENERIC_STABLE with actual USDT type
     public struct LiquidityPool_CATL_STABLE<phantom STABLE> has key {
         id: UID,
-        catl_reserve: Balance<CATALYST_TOKEN>,
+        catl_reserve: Balance<CATL>,
         stable_reserve: Balance<STABLE>,
         lp_supply: Supply<LP_TOKEN>,
         locked_lp: Balance<LP_TOKEN>,
@@ -102,7 +102,7 @@ module catalyst::catalyst_swap {
     /// Add liquidity to CATL/SUI pool
     public fun add_liquidity_catl_sui(
         pool: &mut LiquidityPool_CATL_SUI,
-        catl_coin: Coin<CATALYST_TOKEN>,
+        catl_coin: Coin<CATL>,
         sui_coin: Coin<SUI>,
         min_lp_amount: u64,
         ctx: &mut TxContext
@@ -154,7 +154,7 @@ module catalyst::catalyst_swap {
     /// Swap CATL for SUI
     public fun swap_catl_to_sui(
         pool: &mut LiquidityPool_CATL_SUI,
-        catl_in: Coin<CATALYST_TOKEN>,
+        catl_in: Coin<CATL>,
         min_sui_out: u64,
         ctx: &mut TxContext
     ) {
@@ -252,7 +252,7 @@ module catalyst::catalyst_swap {
     /// Add liquidity to CATL/STABLE pool
     public fun add_liquidity_catl_stable<STABLE>(
         pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
-        catl_coin: Coin<CATALYST_TOKEN>,
+        catl_coin: Coin<CATL>,
         stable_coin: Coin<STABLE>,
         min_lp_amount: u64,
         ctx: &mut TxContext
@@ -300,7 +300,7 @@ module catalyst::catalyst_swap {
     /// Swap CATL for STABLE
     public fun swap_catl_to_stable<STABLE>(
         pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
-        catl_in: Coin<CATALYST_TOKEN>,
+        catl_in: Coin<CATL>,
         min_stable_out: u64,
         ctx: &mut TxContext
     ) {
