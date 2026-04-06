@@ -5,7 +5,7 @@ module catalyst::catl {
     use sui::tx_context::{Self, TxContext};
     use sui::transfer;
     use sui::object::{Self, UID};
-    use std::string::String; 
+    use std::string::String;
 
     public struct CATL has drop {}
 
@@ -24,8 +24,11 @@ module catalyst::catl {
     const E_PAUSED: u64 = 1;
     const E_NOT_ADMIN: u64 = 2;
     const E_INVALID_AMOUNT: u64 = 3;
-    const E_INSUFFICIENT_SUPPLY: u64 = 4;
+    /// ✅ Hard cap: 100,000,000 CATL × 10^9 decimals = 100_000_000_000_000_000
+    /// After this supply is reached, mint() will permanently abort — no more CATL can ever be minted.
+    const E_MINT_CAP_REACHED: u64 = 4;
 
+    /// 100M CATL hard cap (9 decimals)
     const TOTAL_SUPPLY: u64 = 100_000_000_000_000_000;
 
     fun init(witness: CATL, ctx: &mut TxContext) {
@@ -61,6 +64,10 @@ module catalyst::catl {
         transfer::public_transfer(metadata_cap, sender);
     }
 
+    /// Mint CATL tokens.
+    /// ✅ Hard cap enforced: will abort with E_MINT_CAP_REACHED if
+    ///    circulating_supply + amount would exceed 100,000,000 CATL.
+    ///    Once the cap is hit, minting is permanently impossible.
     public entry fun mint(
         treasury_cap: &mut TreasuryCap<CATL>,
         config: &mut TokenConfig,
@@ -69,7 +76,11 @@ module catalyst::catl {
         ctx: &mut TxContext
     ) {
         assert!(!config.paused, E_PAUSED);
-        assert!(config.circulating_supply + amount <= TOTAL_SUPPLY, E_INSUFFICIENT_SUPPLY);
+        // ✅ 100M hard cap — this assert permanently blocks minting beyond the cap
+        assert!(
+            config.circulating_supply + amount <= TOTAL_SUPPLY,
+            E_MINT_CAP_REACHED
+        );
 
         let coins = coin::mint(treasury_cap, amount, ctx);
         config.circulating_supply = config.circulating_supply + amount;
@@ -125,11 +136,8 @@ module catalyst::catl {
         config.treasury_address
     }
 
-    // ======== Metadata Update Functions (via coin_registry) ========  // <-- NEW
+    // ======== Metadata Update Functions ========
 
-    /// Update the icon URL for CATL token.
-    /// Requires MetadataCap<CATL> (transferred to deployer during init)
-    /// and the shared Currency<CATL> object (available after finalize_registration).
     public entry fun update_icon_url(
         currency: &mut coin_registry::Currency<CATL>,
         metadata_cap: &coin_registry::MetadataCap<CATL>,
@@ -138,7 +146,6 @@ module catalyst::catl {
         coin_registry::set_icon_url(currency, metadata_cap, new_icon_url);
     }
 
-    /// Update the name of the CATL token.
     public entry fun update_name(
         currency: &mut coin_registry::Currency<CATL>,
         metadata_cap: &coin_registry::MetadataCap<CATL>,
@@ -147,7 +154,6 @@ module catalyst::catl {
         coin_registry::set_name(currency, metadata_cap, new_name);
     }
 
-    /// Update the description of the CATL token.
     public entry fun update_description(
         currency: &mut coin_registry::Currency<CATL>,
         metadata_cap: &coin_registry::MetadataCap<CATL>,

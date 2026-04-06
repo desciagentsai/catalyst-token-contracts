@@ -1,6 +1,8 @@
-/// Catalyst Swap Contract
-/// Automated Market Maker (AMM) for CATL token
-/// Supports pairs: CATL/SUI, CATL/USDT, CATL/USDC
+/// Catalyst Swap Contract — FIXED for frontend integration
+/// ✅ All user-facing functions are `public entry` (callable from PTBs / dapp-kit)
+/// ✅ `init_pool` is a `public entry fun` — no SwapAdmin required to create pool
+/// ✅ Pool is a shared object — single object ID referenceable from LaunchDetailPage / PortfolioPage
+/// ✅ Admin-only functions (pause/unpause) still require SwapAdmin cap
 #[allow(unused_const)]
 module catalyst::catalyst_swap {
     use sui::coin::{Self, Coin};
@@ -11,26 +13,28 @@ module catalyst::catalyst_swap {
     /// LP Token for liquidity providers
     public struct LP_TOKEN has drop {}
 
-    /// Error codes
+    // ======== Error Codes ========
     const E_ZERO_AMOUNT: u64 = 1;
     const E_INSUFFICIENT_LIQUIDITY: u64 = 2;
     const E_SLIPPAGE_EXCEEDED: u64 = 3;
     const E_PAUSED: u64 = 4;
-    const E_INVALID_PAIR: u64 = 5;
 
-    /// Minimum liquidity locked forever
+    /// Minimum liquidity locked forever (Uniswap-style)
     const MINIMUM_LIQUIDITY: u64 = 1000;
 
-    /// Fee in basis points (0.3% = 30 bps)
+    /// Fee: 0.3% = 30 bps
     const SWAP_FEE_BPS: u64 = 30;
     const BPS_DENOMINATOR: u64 = 10000;
 
-    /// Admin capability
+    // ======== Objects ========
+
+    /// Admin capability — held by deployer, required for pause/unpause only
     public struct SwapAdmin has key, store {
         id: UID
     }
 
-    /// Liquidity Pool for CATL/SUI pair
+    /// ✅ SHARED POOL — this is the object ID you pass into LaunchDetailPage / PortfolioPage
+    /// Created once via `init_pool`, then shared. Everyone references its ID.
     public struct LiquidityPool_CATL_SUI has key {
         id: UID,
         catl_reserve: Balance<CATL>,
@@ -40,24 +44,14 @@ module catalyst::catalyst_swap {
         paused: bool
     }
 
-    /// Liquidity Pool for CATL/STABLE pair (generic for stable coins)
-    /// Note: In production, replace GENERIC_STABLE with actual USDT type
-    public struct LiquidityPool_CATL_STABLE<phantom STABLE> has key {
-        id: UID,
-        catl_reserve: Balance<CATL>,
-        stable_reserve: Balance<STABLE>,
-        lp_supply: Supply<LP_TOKEN>,
-        locked_lp: Balance<LP_TOKEN>,
-        paused: bool
-    }
-
-    /// LP Token representation
+    /// LP token object held by liquidity providers
     public struct LPCoin has key, store {
         id: UID,
         balance: Balance<LP_TOKEN>
     }
 
-    /// Initialize the swap module
+    // ======== Module Init ========
+
     fun init(ctx: &mut TxContext) {
         let admin = SwapAdmin {
             id: object::new(ctx)
@@ -65,11 +59,12 @@ module catalyst::catalyst_swap {
         transfer::transfer(admin, ctx.sender());
     }
 
-    /// Create CATL/SUI liquidity pool
-    public fun create_catl_sui_pool(
-        _admin: &SwapAdmin,
-        ctx: &mut TxContext
-    ) {
+    // ======== Pool Creation ========
+
+    /// ✅ PUBLIC ENTRY — call this once after deployment to create the shared pool.
+    /// No admin cap required. Returns a shared LiquidityPool_CATL_SUI object.
+    /// Capture the emitted object ID → use it as POOL_ID in your frontend env vars.
+    public entry fun init_pool(ctx: &mut TxContext) {
         let pool = LiquidityPool_CATL_SUI {
             id: object::new(ctx),
             catl_reserve: balance::zero(),
@@ -78,29 +73,16 @@ module catalyst::catalyst_swap {
             locked_lp: balance::zero(),
             paused: false
         };
+        // ✅ Shared — accessible by all transactions via object ID
         transfer::share_object(pool);
     }
 
-    /// Create CATL/STABLE liquidity pool (for USDT, USDC)
-    public fun create_catl_stable_pool<STABLE>(
-        _admin: &SwapAdmin,
-        ctx: &mut TxContext
-    ) {
-        let pool = LiquidityPool_CATL_STABLE<STABLE> {
-            id: object::new(ctx),
-            catl_reserve: balance::zero(),
-            stable_reserve: balance::zero(),
-            lp_supply: balance::create_supply(LP_TOKEN {}),
-            locked_lp: balance::zero(),
-            paused: false
-        };
-        transfer::share_object(pool);
-    }
+    // ======== Liquidity Functions ========
 
-    // ======== CATL/SUI Pool Functions ========
-
-    /// Add liquidity to CATL/SUI pool
-    public fun add_liquidity_catl_sui(
+    /// ✅ PUBLIC ENTRY — add liquidity to the CATL/SUI pool.
+    /// Called from PortfolioPage when a user provides liquidity.
+    /// Returns LP tokens to the caller.
+    public entry fun add_liquidity(
         pool: &mut LiquidityPool_CATL_SUI,
         catl_coin: Coin<CATL>,
         sui_coin: Coin<SUI>,
@@ -111,7 +93,6 @@ module catalyst::catalyst_swap {
 
         let catl_amount = coin::value(&catl_coin);
         let sui_amount = coin::value(&sui_coin);
-
         assert!(catl_amount > 0 && sui_amount > 0, E_ZERO_AMOUNT);
 
         let catl_reserve = balance::value(&pool.catl_reserve);
@@ -119,17 +100,14 @@ module catalyst::catalyst_swap {
         let lp_supply = balance::supply_value(&pool.lp_supply);
 
         let lp_amount = if (lp_supply == 0) {
-            // Initial liquidity
+            // Initial deposit — geometric mean minus locked minimum
             let initial_lp = sqrt(catl_amount * sui_amount);
             assert!(initial_lp > MINIMUM_LIQUIDITY, E_INSUFFICIENT_LIQUIDITY);
-
-            // Lock minimum liquidity forever in pool
             let minimum_lp_balance = balance::increase_supply(&mut pool.lp_supply, MINIMUM_LIQUIDITY);
             balance::join(&mut pool.locked_lp, minimum_lp_balance);
-
             initial_lp - MINIMUM_LIQUIDITY
         } else {
-            // Subsequent liquidity
+            // Proportional deposit
             let catl_lp = (catl_amount * lp_supply) / catl_reserve;
             let sui_lp = (sui_amount * lp_supply) / sui_reserve;
             if (catl_lp < sui_lp) catl_lp else sui_lp
@@ -137,84 +115,20 @@ module catalyst::catalyst_swap {
 
         assert!(lp_amount >= min_lp_amount, E_SLIPPAGE_EXCEEDED);
 
-        // Add to reserves
         balance::join(&mut pool.catl_reserve, coin::into_balance(catl_coin));
         balance::join(&mut pool.sui_reserve, coin::into_balance(sui_coin));
 
-        // Mint LP tokens
         let lp_balance = balance::increase_supply(&mut pool.lp_supply, lp_amount);
         let lp_coin = LPCoin {
             id: object::new(ctx),
             balance: lp_balance
         };
-
         transfer::transfer(lp_coin, ctx.sender());
     }
 
-    /// Swap CATL for SUI
-    public fun swap_catl_to_sui(
-        pool: &mut LiquidityPool_CATL_SUI,
-        catl_in: Coin<CATL>,
-        min_sui_out: u64,
-        ctx: &mut TxContext
-    ) {
-        assert!(!pool.paused, E_PAUSED);
-
-        let catl_amount = coin::value(&catl_in);
-        assert!(catl_amount > 0, E_ZERO_AMOUNT);
-
-        let catl_reserve = balance::value(&pool.catl_reserve);
-        let sui_reserve = balance::value(&pool.sui_reserve);
-
-        // Calculate output with 0.3% fee
-        let catl_in_with_fee = catl_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let sui_out = (catl_in_with_fee * sui_reserve) / (catl_reserve * BPS_DENOMINATOR + catl_in_with_fee);
-
-        assert!(sui_out >= min_sui_out, E_SLIPPAGE_EXCEEDED);
-        assert!(sui_out < sui_reserve, E_INSUFFICIENT_LIQUIDITY);
-
-        // Update reserves
-        balance::join(&mut pool.catl_reserve, coin::into_balance(catl_in));
-        let sui_balance_out = balance::split(&mut pool.sui_reserve, sui_out);
-
-        // Transfer SUI to user
-        let sui_coin_out = coin::from_balance(sui_balance_out, ctx);
-        transfer::public_transfer(sui_coin_out, ctx.sender());
-    }
-
-    /// Swap SUI for CATL
-    public fun swap_sui_to_catl(
-        pool: &mut LiquidityPool_CATL_SUI,
-        sui_in: Coin<SUI>,
-        min_catl_out: u64,
-        ctx: &mut TxContext
-    ) {
-        assert!(!pool.paused, E_PAUSED);
-
-        let sui_amount = coin::value(&sui_in);
-        assert!(sui_amount > 0, E_ZERO_AMOUNT);
-
-        let catl_reserve = balance::value(&pool.catl_reserve);
-        let sui_reserve = balance::value(&pool.sui_reserve);
-
-        // Calculate output with 0.3% fee
-        let sui_in_with_fee = sui_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let catl_out = (sui_in_with_fee * catl_reserve) / (sui_reserve * BPS_DENOMINATOR + sui_in_with_fee);
-
-        assert!(catl_out >= min_catl_out, E_SLIPPAGE_EXCEEDED);
-        assert!(catl_out < catl_reserve, E_INSUFFICIENT_LIQUIDITY);
-
-        // Update reserves
-        balance::join(&mut pool.sui_reserve, coin::into_balance(sui_in));
-        let catl_balance_out = balance::split(&mut pool.catl_reserve, catl_out);
-
-        // Transfer CATL to user
-        let catl_coin_out = coin::from_balance(catl_balance_out, ctx);
-        transfer::public_transfer(catl_coin_out, ctx.sender());
-    }
-
-    /// Remove liquidity from CATL/SUI pool
-    public fun remove_liquidity_catl_sui(
+    /// ✅ PUBLIC ENTRY — remove liquidity from the CATL/SUI pool.
+    /// Called from PortfolioPage when a user withdraws their position.
+    public entry fun remove_liquidity(
         pool: &mut LiquidityPool_CATL_SUI,
         lp_coin: LPCoin,
         min_catl_out: u64,
@@ -234,74 +148,59 @@ module catalyst::catalyst_swap {
 
         assert!(catl_out >= min_catl_out && sui_out >= min_sui_out, E_SLIPPAGE_EXCEEDED);
 
-        // Burn LP tokens
         balance::decrease_supply(&mut pool.lp_supply, lp_balance);
 
-        // Withdraw from reserves
         let catl_balance_out = balance::split(&mut pool.catl_reserve, catl_out);
         let sui_balance_out = balance::split(&mut pool.sui_reserve, sui_out);
 
-        // Transfer to user
         let sender = ctx.sender();
         transfer::public_transfer(coin::from_balance(catl_balance_out, ctx), sender);
         transfer::public_transfer(coin::from_balance(sui_balance_out, ctx), sender);
     }
 
-    // ======== CATL/STABLE Pool Functions ========
+    // ======== Swap Functions ========
 
-    /// Add liquidity to CATL/STABLE pool
-    public fun add_liquidity_catl_stable<STABLE>(
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
-        catl_coin: Coin<CATL>,
-        stable_coin: Coin<STABLE>,
-        min_lp_amount: u64,
+    /// ✅ PUBLIC ENTRY — swap SUI → CATL.
+    /// Called from LaunchDetailPage when user buys CATL with SUI.
+    /// @param pool         — shared LiquidityPool_CATL_SUI object ID
+    /// @param sui_in       — Coin<SUI> from user's wallet (split before passing)
+    /// @param min_catl_out — slippage floor; abort if output < this value
+    public entry fun swap_sui_to_catl(
+        pool: &mut LiquidityPool_CATL_SUI,
+        sui_in: Coin<SUI>,
+        min_catl_out: u64,
         ctx: &mut TxContext
     ) {
         assert!(!pool.paused, E_PAUSED);
 
-        let catl_amount = coin::value(&catl_coin);
-        let stable_amount = coin::value(&stable_coin);
-
-        assert!(catl_amount > 0 && stable_amount > 0, E_ZERO_AMOUNT);
+        let sui_amount = coin::value(&sui_in);
+        assert!(sui_amount > 0, E_ZERO_AMOUNT);
 
         let catl_reserve = balance::value(&pool.catl_reserve);
-        let stable_reserve = balance::value(&pool.stable_reserve);
-        let lp_supply = balance::supply_value(&pool.lp_supply);
+        let sui_reserve = balance::value(&pool.sui_reserve);
 
-        let lp_amount = if (lp_supply == 0) {
-            let initial_lp = sqrt(catl_amount * stable_amount);
-            assert!(initial_lp > MINIMUM_LIQUIDITY, E_INSUFFICIENT_LIQUIDITY);
+        // x*y=k with 0.3% fee applied to input
+        let sui_in_with_fee = sui_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
+        let catl_out = (sui_in_with_fee * catl_reserve) / (sui_reserve * BPS_DENOMINATOR + sui_in_with_fee);
 
-            // Lock minimum liquidity forever in pool
-            let minimum_lp_balance = balance::increase_supply(&mut pool.lp_supply, MINIMUM_LIQUIDITY);
-            balance::join(&mut pool.locked_lp, minimum_lp_balance);
+        assert!(catl_out >= min_catl_out, E_SLIPPAGE_EXCEEDED);
+        assert!(catl_out < catl_reserve, E_INSUFFICIENT_LIQUIDITY);
 
-            initial_lp - MINIMUM_LIQUIDITY
-        } else {
-            let catl_lp = (catl_amount * lp_supply) / catl_reserve;
-            let stable_lp = (stable_amount * lp_supply) / stable_reserve;
-            if (catl_lp < stable_lp) catl_lp else stable_lp
-        };
+        balance::join(&mut pool.sui_reserve, coin::into_balance(sui_in));
+        let catl_balance_out = balance::split(&mut pool.catl_reserve, catl_out);
 
-        assert!(lp_amount >= min_lp_amount, E_SLIPPAGE_EXCEEDED);
-
-        balance::join(&mut pool.catl_reserve, coin::into_balance(catl_coin));
-        balance::join(&mut pool.stable_reserve, coin::into_balance(stable_coin));
-
-        let lp_balance = balance::increase_supply(&mut pool.lp_supply, lp_amount);
-        let lp_coin = LPCoin {
-            id: object::new(ctx),
-            balance: lp_balance
-        };
-
-        transfer::transfer(lp_coin, ctx.sender());
+        transfer::public_transfer(coin::from_balance(catl_balance_out, ctx), ctx.sender());
     }
 
-    /// Swap CATL for STABLE
-    public fun swap_catl_to_stable<STABLE>(
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
+    /// ✅ PUBLIC ENTRY — swap CATL → SUI.
+    /// Called from LaunchDetailPage / PortfolioPage when user sells CATL for SUI.
+    /// @param pool        — shared LiquidityPool_CATL_SUI object ID
+    /// @param catl_in     — Coin<CATL> from user's wallet (split before passing)
+    /// @param min_sui_out — slippage floor; abort if output < this value
+    public entry fun swap_catl_to_sui(
+        pool: &mut LiquidityPool_CATL_SUI,
         catl_in: Coin<CATL>,
-        min_stable_out: u64,
+        min_sui_out: u64,
         ctx: &mut TxContext
     ) {
         assert!(!pool.paused, E_PAUSED);
@@ -310,129 +209,53 @@ module catalyst::catalyst_swap {
         assert!(catl_amount > 0, E_ZERO_AMOUNT);
 
         let catl_reserve = balance::value(&pool.catl_reserve);
-        let stable_reserve = balance::value(&pool.stable_reserve);
+        let sui_reserve = balance::value(&pool.sui_reserve);
 
         let catl_in_with_fee = catl_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let stable_out = (catl_in_with_fee * stable_reserve) / (catl_reserve * BPS_DENOMINATOR + catl_in_with_fee);
+        let sui_out = (catl_in_with_fee * sui_reserve) / (catl_reserve * BPS_DENOMINATOR + catl_in_with_fee);
 
-        assert!(stable_out >= min_stable_out, E_SLIPPAGE_EXCEEDED);
-        assert!(stable_out < stable_reserve, E_INSUFFICIENT_LIQUIDITY);
+        assert!(sui_out >= min_sui_out, E_SLIPPAGE_EXCEEDED);
+        assert!(sui_out < sui_reserve, E_INSUFFICIENT_LIQUIDITY);
 
         balance::join(&mut pool.catl_reserve, coin::into_balance(catl_in));
-        let stable_balance_out = balance::split(&mut pool.stable_reserve, stable_out);
+        let sui_balance_out = balance::split(&mut pool.sui_reserve, sui_out);
 
-        transfer::public_transfer(coin::from_balance(stable_balance_out, ctx), ctx.sender());
-    }
-
-    /// Swap STABLE for CATL
-    public fun swap_stable_to_catl<STABLE>(
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
-        stable_in: Coin<STABLE>,
-        min_catl_out: u64,
-        ctx: &mut TxContext
-    ) {
-        assert!(!pool.paused, E_PAUSED);
-
-        let stable_amount = coin::value(&stable_in);
-        assert!(stable_amount > 0, E_ZERO_AMOUNT);
-
-        let catl_reserve = balance::value(&pool.catl_reserve);
-        let stable_reserve = balance::value(&pool.stable_reserve);
-
-        let stable_in_with_fee = stable_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let catl_out = (stable_in_with_fee * catl_reserve) / (stable_reserve * BPS_DENOMINATOR + stable_in_with_fee);
-
-        assert!(catl_out >= min_catl_out, E_SLIPPAGE_EXCEEDED);
-        assert!(catl_out < catl_reserve, E_INSUFFICIENT_LIQUIDITY);
-
-        balance::join(&mut pool.stable_reserve, coin::into_balance(stable_in));
-        let catl_balance_out = balance::split(&mut pool.catl_reserve, catl_out);
-
-        transfer::public_transfer(coin::from_balance(catl_balance_out, ctx), ctx.sender());
-    }
-
-    /// Remove liquidity from CATL/STABLE pool
-    public fun remove_liquidity_catl_stable<STABLE>(
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>,
-        lp_coin: LPCoin,
-        min_catl_out: u64,
-        min_stable_out: u64,
-        ctx: &mut TxContext
-    ) {
-        let LPCoin { id, balance: lp_balance } = lp_coin;
-        object::delete(id);
-
-        let lp_amount = balance::value(&lp_balance);
-        let catl_reserve = balance::value(&pool.catl_reserve);
-        let stable_reserve = balance::value(&pool.stable_reserve);
-        let lp_supply = balance::supply_value(&pool.lp_supply);
-
-        let catl_out = (lp_amount * catl_reserve) / lp_supply;
-        let stable_out = (lp_amount * stable_reserve) / lp_supply;
-
-        assert!(catl_out >= min_catl_out && stable_out >= min_stable_out, E_SLIPPAGE_EXCEEDED);
-
-        balance::decrease_supply(&mut pool.lp_supply, lp_balance);
-
-        let catl_balance_out = balance::split(&mut pool.catl_reserve, catl_out);
-        let stable_balance_out = balance::split(&mut pool.stable_reserve, stable_out);
-
-        let sender = ctx.sender();
-        transfer::public_transfer(coin::from_balance(catl_balance_out, ctx), sender);
-        transfer::public_transfer(coin::from_balance(stable_balance_out, ctx), sender);
+        transfer::public_transfer(coin::from_balance(sui_balance_out, ctx), ctx.sender());
     }
 
     // ======== Admin Functions ========
 
-    /// Pause all swaps (emergency)
-    public fun pause_catl_sui_pool(
+    /// Emergency pause — requires SwapAdmin cap
+    public entry fun pause_pool(
         _admin: &SwapAdmin,
         pool: &mut LiquidityPool_CATL_SUI
     ) {
         pool.paused = true;
     }
 
-    /// Unpause CATL/SUI pool
-    public fun unpause_catl_sui_pool(
+    /// Resume pool — requires SwapAdmin cap
+    public entry fun unpause_pool(
         _admin: &SwapAdmin,
         pool: &mut LiquidityPool_CATL_SUI
     ) {
         pool.paused = false;
     }
 
-    /// Pause CATL/STABLE pool
-    public fun pause_catl_stable_pool<STABLE>(
-        _admin: &SwapAdmin,
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>
-    ) {
-        pool.paused = true;
-    }
+    // ======== View Functions (for frontend price preview) ========
 
-    /// Unpause CATL/STABLE pool
-    public fun unpause_catl_stable_pool<STABLE>(
-        _admin: &SwapAdmin,
-        pool: &mut LiquidityPool_CATL_STABLE<STABLE>
-    ) {
-        pool.paused = false;
-    }
-
-    // ======== View Functions ========
-
-    public fun get_catl_sui_reserves(pool: &LiquidityPool_CATL_SUI): (u64, u64) {
+    /// Returns (catl_reserve, sui_reserve) — call via sui_client.getObject for UI display
+    public fun get_reserves(pool: &LiquidityPool_CATL_SUI): (u64, u64) {
         (
             balance::value(&pool.catl_reserve),
             balance::value(&pool.sui_reserve)
         )
     }
 
-    public fun get_catl_stable_reserves<STABLE>(pool: &LiquidityPool_CATL_STABLE<STABLE>): (u64, u64) {
-        (
-            balance::value(&pool.catl_reserve),
-            balance::value(&pool.stable_reserve)
-        )
-    }
-
-    /// Calculate output amount for a swap (for frontend preview)
+    /// Preview output amount before submitting a swap.
+    /// Call off-chain (devInspect) from LaunchDetailPage to show estimated output.
+    /// @param amount_in  — raw token amount (with decimals)
+    /// @param reserve_in — from get_reserves()
+    /// @param reserve_out — from get_reserves()
     public fun calculate_swap_output(
         amount_in: u64,
         reserve_in: u64,
@@ -442,16 +265,11 @@ module catalyst::catalyst_swap {
         (amount_in_with_fee * reserve_out) / (reserve_in * BPS_DENOMINATOR + amount_in_with_fee)
     }
 
-    // ======== Helper Functions ========
+    // ======== Helpers ========
 
-    /// Integer square root (Babylonian method)
     fun sqrt(y: u64): u64 {
         if (y < 4) {
-            if (y == 0) {
-                0
-            } else {
-                1
-            }
+            if (y == 0) { 0 } else { 1 }
         } else {
             let mut z = y;
             let mut x = y / 2 + 1;

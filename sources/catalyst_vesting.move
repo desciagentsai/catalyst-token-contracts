@@ -1,240 +1,148 @@
-/// Catalyst Vesting Contract
-/// Manages token vesting for different allocation categories
-/// All released tokens are sent to treasury for disbursement
+/// Catalyst Vesting Contract — Restructured Tokenomics
+///
+/// TOKENOMICS:
+///   Total Supply:    100,000,000 CATL
+///   Presale (TGE):    10,000,000 CATL  (released at TGE, outside this contract)
+///   Vesting Vault:    90,000,000 CATL  (locked in this contract)
+///
+/// EMISSION SCHEDULE (48 months):
+///   Monthly emission: 1,872,340.425531915 CATL
+///
+///   Treasury (83% of emission):
+///     - Months 1–48: receives 83% each month
+///     - Months 37–48: also receives team's 17% (team fully vested)
+///
+///   Team (17% of emission):
+///     - Months 1–12:  withheld (cliff — tokens accumulate in contract)
+///     - Month 13:     lump sum of 12 months' accumulated 17% + month 13 regular 17%
+///     - Months 14–36: receives 17% monthly (23 additional months)
+///     - Months 37–48: team fully vested, 17% redirected to treasury
+///     - Team payment window: months 13–36 (24 months of payouts)
+///
+/// DUST:
+///   48 * 1,872,340.425531915 = 89,872,340.425531920 CATL emitted
+///   Vault holds 90,000,000 CATL → ~127,659.57 CATL remainder
+///   Admin can withdraw remainder after all 48 months are released.
+///
 #[allow(unused_const)]
 module catalyst::catalyst_vesting {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
     use sui::clock::{Self, Clock};
-    use sui::table::{Self, Table};
     use catalyst::catl::CATL;
 
-    /// Vesting schedule types
-    const SCHEDULE_LINEAR: u8 = 0;
-    const SCHEDULE_CLIFF_VEST: u8 = 1;
-    const SCHEDULE_EMISSION: u8 = 2;
+    // ======== Constants ========
 
-    /// Allocation categories
-    const CATEGORY_PRESALE: u8 = 0;
-    const CATEGORY_ECOSYSTEM: u8 = 1;
-    const CATEGORY_STAKING_REWARDS: u8 = 2;
-    const CATEGORY_TEAM: u8 = 3;
-    const CATEGORY_TREASURY_DAO: u8 = 4;
-    const CATEGORY_STRATEGIC: u8 = 5;
+    /// 30 days in milliseconds
+    const MONTH_MS: u64 = 2_592_000_000;
 
-    /// Error codes
+    /// Monthly total emission in base units (9 decimals)
+    /// 1,872,340.425531915 CATL = 1_872_340_425_531_915 base units
+    const MONTHLY_EMISSION: u64 = 1_872_340_425_531_915;
+
+    /// Team percentage: 17 / 100
+    const TEAM_PCT: u64 = 17;
+    const PCT_BASE: u64 = 100;
+
+    /// Team cliff: first 12 months, no team payouts (tokens accumulate)
+    const TEAM_CLIFF_MONTHS: u64 = 12;
+
+    /// Last month the team receives their 17% share (inclusive)
+    /// Months 13–36 = 24 payout months
+    const TEAM_LAST_MONTH: u64 = 36;
+
+    /// Total vesting duration
+    const TOTAL_MONTHS: u64 = 48;
+
+    // ======== Error Codes ========
+
     const E_NOT_ADMIN: u64 = 1;
     const E_NOT_STARTED: u64 = 2;
-    const E_INVALID_SCHEDULE: u64 = 3;
     const E_NOTHING_TO_RELEASE: u64 = 4;
     const E_ALREADY_INITIALIZED: u64 = 5;
+    const E_VESTING_NOT_COMPLETE: u64 = 6;
 
-    /// Time constants (in milliseconds)
-    const MONTH_MS: u64 = 2_592_000_000; // 30 days
+    // ======== Objects ========
 
-    /// Admin capability
     public struct VestingAdmin has key, store {
         id: UID
     }
 
-    /// Individual vesting schedule
-    public struct VestingSchedule has store {
-        category: u8,
-        schedule_type: u8,
-        total_amount: u64,
-        released_amount: u64,
-        start_time: u64,
-        cliff_duration: u64,
-        vesting_duration: u64,
-        last_release_time: u64
-    }
-
-    /// Global vesting vault
     public struct VestingVault has key {
         id: UID,
-        schedules: Table<u8, VestingSchedule>,
+        /// All locked CATL tokens
         locked_balance: Balance<CATL>,
+        /// Receives 83% of monthly emission (+ team overflow after month 36)
         treasury_address: address,
+        /// Receives 17% of monthly emission (with cliff logic)
+        team_address: address,
+        /// Timestamp (ms) when vesting started
+        start_time: u64,
+        /// Number of monthly emissions already processed
+        months_released: u64,
+        /// Team tokens accumulated during the 12-month cliff
+        team_accumulated: u64,
         initialized: bool,
         paused: bool
     }
 
-    /// Initialize the vesting vault
-    fun init(ctx: &mut TxContext) {
-        let admin = VestingAdmin {
-            id: object::new(ctx)
-        };
+    // ======== Init ========
 
+    fun init(ctx: &mut TxContext) {
+        let admin = VestingAdmin { id: object::new(ctx) };
         let vault = VestingVault {
             id: object::new(ctx),
-            schedules: table::new(ctx),
             locked_balance: balance::zero(),
             treasury_address: ctx.sender(),
+            team_address: ctx.sender(),
+            start_time: 0,
+            months_released: 0,
+            team_accumulated: 0,
             initialized: false,
             paused: false
         };
-
         transfer::share_object(vault);
         transfer::transfer(admin, ctx.sender());
     }
 
-    /// Initialize all vesting schedules with token allocations
-    /// Must be called once after deployment with all tokens
-    public fun initialize_schedules(
+    // ======== Setup ========
+
+    /// Call once after deployment. Deposits CATL tokens into the vault and
+    /// sets the team wallet address. The clock marks the vesting start time.
+    ///
+    /// @param tokens   — Coin<CATL> holding the 90M tokens for the vault
+    /// @param team_addr — wallet address that will receive team allocations
+    public entry fun initialize(
         _admin: &VestingAdmin,
         vault: &mut VestingVault,
         tokens: Coin<CATL>,
+        team_addr: address,
         clock: &Clock,
         _ctx: &mut TxContext
     ) {
         assert!(!vault.initialized, E_ALREADY_INITIALIZED);
 
-        let current_time = clock::timestamp_ms(clock);
-        let _total_amount = coin::value(&tokens);
-
-        // Expected: 100M CATL with 9 decimals = 100_000_000_000_000_000
-
-        // Add tokens to vault
         let token_balance = coin::into_balance(tokens);
         balance::join(&mut vault.locked_balance, token_balance);
 
-        // 1. Presale: 12M CATL - 6 month linear vest
-        table::add(&mut vault.schedules, CATEGORY_PRESALE, VestingSchedule {
-            category: CATEGORY_PRESALE,
-            schedule_type: SCHEDULE_LINEAR,
-            total_amount: 12_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 0,
-            vesting_duration: 6 * MONTH_MS,
-            last_release_time: current_time
-        });
-
-        // 2. Ecosystem Incentives: 30M CATL - 48 month linear vest
-        table::add(&mut vault.schedules, CATEGORY_ECOSYSTEM, VestingSchedule {
-            category: CATEGORY_ECOSYSTEM,
-            schedule_type: SCHEDULE_LINEAR,
-            total_amount: 30_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 0,
-            vesting_duration: 48 * MONTH_MS,
-            last_release_time: current_time
-        });
-
-        // 3. Staking Rewards: 20M CATL - 48 month emission-based
-        table::add(&mut vault.schedules, CATEGORY_STAKING_REWARDS, VestingSchedule {
-            category: CATEGORY_STAKING_REWARDS,
-            schedule_type: SCHEDULE_EMISSION,
-            total_amount: 20_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 0,
-            vesting_duration: 48 * MONTH_MS,
-            last_release_time: current_time
-        });
-
-        // 4. Team: 15M CATL - 12 month cliff + 24 month vest
-        table::add(&mut vault.schedules, CATEGORY_TEAM, VestingSchedule {
-            category: CATEGORY_TEAM,
-            schedule_type: SCHEDULE_CLIFF_VEST,
-            total_amount: 15_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 12 * MONTH_MS,
-            vesting_duration: 24 * MONTH_MS,
-            last_release_time: current_time
-        });
-
-        // 5. Treasury/DAO: 15M CATL - 48 month structured release
-        table::add(&mut vault.schedules, CATEGORY_TREASURY_DAO, VestingSchedule {
-            category: CATEGORY_TREASURY_DAO,
-            schedule_type: SCHEDULE_LINEAR,
-            total_amount: 15_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 0,
-            vesting_duration: 48 * MONTH_MS,
-            last_release_time: current_time
-        });
-
-        // 6. Strategic Partners: 10M CATL - 6 month cliff + 12 month vest
-        table::add(&mut vault.schedules, CATEGORY_STRATEGIC, VestingSchedule {
-            category: CATEGORY_STRATEGIC,
-            schedule_type: SCHEDULE_CLIFF_VEST,
-            total_amount: 10_000_000_000_000_000,
-            released_amount: 0,
-            start_time: current_time,
-            cliff_duration: 6 * MONTH_MS,
-            vesting_duration: 12 * MONTH_MS,
-            last_release_time: current_time
-        });
-
+        vault.start_time = clock::timestamp_ms(clock);
+        vault.team_address = team_addr;
         vault.initialized = true;
     }
 
-    /// Calculate unlocked amount for a schedule
-    fun calculate_unlocked(
-        schedule: &VestingSchedule,
-        current_time: u64
-    ): u64 {
-        let time_elapsed = current_time - schedule.start_time;
+    // ======== Release ========
 
-        // Before cliff
-        if (time_elapsed < schedule.cliff_duration) {
-            return 0
-        };
-
-        // After full vesting
-        let total_duration = schedule.cliff_duration + schedule.vesting_duration;
-        if (time_elapsed >= total_duration) {
-            return schedule.total_amount
-        };
-
-        // During vesting period
-        let vesting_elapsed = time_elapsed - schedule.cliff_duration;
-
-        if (schedule.schedule_type == SCHEDULE_LINEAR || schedule.schedule_type == SCHEDULE_CLIFF_VEST) {
-            // Linear vesting
-            (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration
-        } else if (schedule.schedule_type == SCHEDULE_EMISSION) {
-            // Emission-based (linear for now, can be customized)
-            (schedule.total_amount * vesting_elapsed) / schedule.vesting_duration
-        } else {
-            0
-        }
-    }
-
-    /// Release unlocked tokens for a specific category to treasury
-    public fun release_category(
-        vault: &mut VestingVault,
-        category: u8,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        assert!(!vault.paused, E_NOT_ADMIN);
-        assert!(vault.initialized, E_NOT_STARTED);
-
-        let schedule = table::borrow_mut(&mut vault.schedules, category);
-        let current_time = clock::timestamp_ms(clock);
-
-        let unlocked_total = calculate_unlocked(schedule, current_time);
-        let releasable = unlocked_total - schedule.released_amount;
-
-        assert!(releasable > 0, E_NOTHING_TO_RELEASE);
-
-        // Update schedule
-        schedule.released_amount = schedule.released_amount + releasable;
-        schedule.last_release_time = current_time;
-
-        // Transfer tokens to treasury
-        let released_balance = balance::split(&mut vault.locked_balance, releasable);
-        let released_coin = coin::from_balance(released_balance, ctx);
-        transfer::public_transfer(released_coin, vault.treasury_address);
-    }
-
-    /// Release all unlocked tokens from all categories
-    public fun release_all(
+    /// Release all unlocked monthly emissions up to the current time.
+    /// Callable by anyone (permissionless) — tokens go to treasury and team
+    /// addresses stored in the vault.
+    ///
+    /// For each unreleased month:
+    ///   - Treasury always receives 83% of MONTHLY_EMISSION
+    ///   - Months 1–12:  team 17% accumulated (cliff)
+    ///   - Month 13:     team receives lump sum (12 months accumulated + month 13 share)
+    ///   - Months 14–36: team receives 17% monthly
+    ///   - Months 37–48: team done, their 17% goes to treasury
+    public entry fun release(
         vault: &mut VestingVault,
         clock: &Clock,
         ctx: &mut TxContext
@@ -243,44 +151,67 @@ module catalyst::catalyst_vesting {
         assert!(vault.initialized, E_NOT_STARTED);
 
         let current_time = clock::timestamp_ms(clock);
-        let categories = vector[
-            CATEGORY_PRESALE,
-            CATEGORY_ECOSYSTEM,
-            CATEGORY_STAKING_REWARDS,
-            CATEGORY_TEAM,
-            CATEGORY_TREASURY_DAO,
-            CATEGORY_STRATEGIC
-        ];
+        let elapsed_ms = current_time - vault.start_time;
+        let mut months_elapsed = elapsed_ms / MONTH_MS;
 
-        let mut i = 0;
-        let mut total_released = 0u64;
+        // Cap at total vesting duration
+        if (months_elapsed > TOTAL_MONTHS) {
+            months_elapsed = TOTAL_MONTHS;
+        };
 
-        while (i < 6) {
-            let category = *vector::borrow(&categories, i);
-            let schedule = table::borrow_mut(&mut vault.schedules, category);
+        assert!(months_elapsed > vault.months_released, E_NOTHING_TO_RELEASE);
 
-            let unlocked_total = calculate_unlocked(schedule, current_time);
-            let releasable = unlocked_total - schedule.released_amount;
+        let mut treasury_payout = 0u64;
+        let mut team_payout = 0u64;
 
-            if (releasable > 0) {
-                schedule.released_amount = schedule.released_amount + releasable;
-                schedule.last_release_time = current_time;
-                total_released = total_released + releasable;
+        let mut m = vault.months_released + 1;
+        while (m <= months_elapsed) {
+            // Split: treasury gets 83%, team gets 17%
+            // We compute treasury first, then team = total - treasury (no rounding loss)
+            let treasury_share = (MONTHLY_EMISSION * (PCT_BASE - TEAM_PCT)) / PCT_BASE;
+            let team_share = MONTHLY_EMISSION - treasury_share;
+
+            // Treasury always receives their 83%
+            treasury_payout = treasury_payout + treasury_share;
+
+            if (m <= TEAM_CLIFF_MONTHS) {
+                // Months 1–12: cliff — accumulate team tokens in vault
+                vault.team_accumulated = vault.team_accumulated + team_share;
+            } else if (m == TEAM_CLIFF_MONTHS + 1) {
+                // Month 13: lump-sum release of all accumulated + this month's share
+                team_payout = team_payout + vault.team_accumulated + team_share;
+                vault.team_accumulated = 0;
+            } else if (m <= TEAM_LAST_MONTH) {
+                // Months 14–36: regular monthly team payout
+                team_payout = team_payout + team_share;
+            } else {
+                // Months 37–48: team fully vested, redirect 17% to treasury
+                treasury_payout = treasury_payout + team_share;
             };
 
-            i = i + 1;
+            m = m + 1;
         };
 
-        // Transfer all released tokens to treasury
-        if (total_released > 0) {
-            let released_balance = balance::split(&mut vault.locked_balance, total_released);
-            let released_coin = coin::from_balance(released_balance, ctx);
-            transfer::public_transfer(released_coin, vault.treasury_address);
+        vault.months_released = months_elapsed;
+
+        // Transfer to treasury
+        if (treasury_payout > 0) {
+            let t_bal = balance::split(&mut vault.locked_balance, treasury_payout);
+            let t_coin = coin::from_balance(t_bal, ctx);
+            transfer::public_transfer(t_coin, vault.treasury_address);
+        };
+
+        // Transfer to team
+        if (team_payout > 0) {
+            let tm_bal = balance::split(&mut vault.locked_balance, team_payout);
+            let tm_coin = coin::from_balance(tm_bal, ctx);
+            transfer::public_transfer(tm_coin, vault.team_address);
         };
     }
 
-    /// Update treasury address
-    public fun update_treasury(
+    // ======== Admin Functions ========
+
+    public entry fun update_treasury(
         _admin: &VestingAdmin,
         vault: &mut VestingVault,
         new_treasury: address
@@ -288,23 +219,47 @@ module catalyst::catalyst_vesting {
         vault.treasury_address = new_treasury;
     }
 
-    /// Pause vesting releases (emergency)
-    public fun pause(
+    public entry fun update_team_address(
+        _admin: &VestingAdmin,
+        vault: &mut VestingVault,
+        new_team: address
+    ) {
+        vault.team_address = new_team;
+    }
+
+    public entry fun pause(
         _admin: &VestingAdmin,
         vault: &mut VestingVault
     ) {
         vault.paused = true;
     }
 
-    /// Resume vesting releases
-    public fun unpause(
+    public entry fun unpause(
         _admin: &VestingAdmin,
         vault: &mut VestingVault
     ) {
         vault.paused = false;
     }
 
-    /// View functions
+    /// Withdraw any remaining dust after all 48 months have been released.
+    /// Sends remainder to the treasury address.
+    public entry fun withdraw_remainder(
+        _admin: &VestingAdmin,
+        vault: &mut VestingVault,
+        ctx: &mut TxContext
+    ) {
+        assert!(vault.months_released == TOTAL_MONTHS, E_VESTING_NOT_COMPLETE);
+
+        let remaining = balance::value(&vault.locked_balance);
+        if (remaining > 0) {
+            let rem_bal = balance::split(&mut vault.locked_balance, remaining);
+            let rem_coin = coin::from_balance(rem_bal, ctx);
+            transfer::public_transfer(rem_coin, vault.treasury_address);
+        };
+    }
+
+    // ======== View Functions ========
+
     public fun get_locked_balance(vault: &VestingVault): u64 {
         balance::value(&vault.locked_balance)
     }
@@ -313,26 +268,62 @@ module catalyst::catalyst_vesting {
         vault.treasury_address
     }
 
-    /// Get schedule info (for frontend display)
-    public fun get_schedule_info(
+    public fun get_team_address(vault: &VestingVault): address {
+        vault.team_address
+    }
+
+    public fun get_months_released(vault: &VestingVault): u64 {
+        vault.months_released
+    }
+
+    public fun get_team_accumulated(vault: &VestingVault): u64 {
+        vault.team_accumulated
+    }
+
+    /// Returns (total_locked, months_released, team_accumulated, treasury_pending, team_pending)
+    /// Use via devInspect from frontend to check vesting status without executing a release.
+    public fun get_vesting_status(
         vault: &VestingVault,
-        category: u8,
         clock: &Clock
-    ): (u64, u64, u64, u64) {
-        let schedule = table::borrow(&vault.schedules, category);
+    ): (u64, u64, u64, u64, u64) {
         let current_time = clock::timestamp_ms(clock);
-        let unlocked = calculate_unlocked(schedule, current_time);
-        let releasable = if (unlocked > schedule.released_amount) {
-            unlocked - schedule.released_amount
-        } else {
-            0
+        let elapsed_ms = current_time - vault.start_time;
+        let mut months_elapsed = elapsed_ms / MONTH_MS;
+        if (months_elapsed > TOTAL_MONTHS) {
+            months_elapsed = TOTAL_MONTHS;
+        };
+
+        let mut treasury_pending = 0u64;
+        let mut team_pending = 0u64;
+        let mut temp_accumulated = vault.team_accumulated;
+
+        let mut m = vault.months_released + 1;
+        while (m <= months_elapsed) {
+            let treasury_share = (MONTHLY_EMISSION * (PCT_BASE - TEAM_PCT)) / PCT_BASE;
+            let team_share = MONTHLY_EMISSION - treasury_share;
+
+            treasury_pending = treasury_pending + treasury_share;
+
+            if (m <= TEAM_CLIFF_MONTHS) {
+                temp_accumulated = temp_accumulated + team_share;
+            } else if (m == TEAM_CLIFF_MONTHS + 1) {
+                team_pending = team_pending + temp_accumulated + team_share;
+                temp_accumulated = 0;
+            } else if (m <= TEAM_LAST_MONTH) {
+                team_pending = team_pending + team_share;
+            } else {
+                treasury_pending = treasury_pending + team_share;
+            };
+
+            m = m + 1;
         };
 
         (
-            schedule.total_amount,
-            schedule.released_amount,
-            unlocked,
-            releasable
+            balance::value(&vault.locked_balance),
+            vault.months_released,
+            vault.team_accumulated,
+            treasury_pending,
+            team_pending
         )
     }
 }
