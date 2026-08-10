@@ -27,7 +27,7 @@ Catalyst (CATL) is a DeSci innovation platform token built on Sui blockchain wit
 | Team | 15% | 15,000,000 | 12-month cliff + 24-month vest |
 | Treasury/DAO | 15% | 15,000,000 | Structured release over 48 months |
 | Strategic Partners | 10% | 10,000,000 | 6-month cliff + 12-month vest |
-| Presale | 10% | 12,000,000 | 6-month linear vest |
+| Presale | 12% | 12,000,000 | 6-month linear vest |
 | **Total** | **100%** | **100,000,000** | |
 
 ## Features
@@ -50,7 +50,7 @@ Catalyst (CATL) is a DeSci innovation platform token built on Sui blockchain wit
 - ✅ CATL/SUI liquidity pool
 - ✅ CATL/USDT liquidity pool
 - ✅ CATL/USDC liquidity pool
-- ✅ 0.25% swap fee
+- ✅ 0.3% swap fee
 - ✅ Add/Remove liquidity
 - ✅ Slippage protection
 - ✅ Emergency pause
