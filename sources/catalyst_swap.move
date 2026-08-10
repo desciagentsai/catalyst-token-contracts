@@ -1,8 +1,9 @@
 /// Catalyst Swap Contract — FIXED for frontend integration
 /// ✅ All user-facing functions are `public entry` (callable from PTBs / dapp-kit)
-/// ✅ `init_pool` is a `public entry fun` — no SwapAdmin required to create pool
+/// ✅ `init_pool` is a `public entry fun` — requires SwapAdmin so only the
+///    deployer can create the canonical pool (prevents pool spoofing)
 /// ✅ Pool is a shared object — single object ID referenceable from LaunchDetailPage / PortfolioPage
-/// ✅ Admin-only functions (pause/unpause) still require SwapAdmin cap
+/// ✅ Admin-only functions (init_pool, pause/unpause) require SwapAdmin cap
 #[allow(unused_const)]
 module catalyst::catalyst_swap {
     use sui::coin::{Self, Coin};
@@ -62,9 +63,12 @@ module catalyst::catalyst_swap {
     // ======== Pool Creation ========
 
     /// ✅ PUBLIC ENTRY — call this once after deployment to create the shared pool.
-    /// No admin cap required. Returns a shared LiquidityPool_CATL_SUI object.
+    /// Requires SwapAdmin so only the deployer can create the canonical pool —
+    /// this prevents anyone else from spoofing a look-alike LiquidityPool_CATL_SUI
+    /// object and tricking a frontend/user into trading against a fake pool.
+    /// Returns a shared LiquidityPool_CATL_SUI object.
     /// Capture the emitted object ID → use it as POOL_ID in your frontend env vars.
-    public entry fun init_pool(ctx: &mut TxContext) {
+    public entry fun init_pool(_admin: &SwapAdmin, ctx: &mut TxContext) {
         let pool = LiquidityPool_CATL_SUI {
             id: object::new(ctx),
             catl_reserve: balance::zero(),
@@ -84,8 +88,8 @@ module catalyst::catalyst_swap {
     /// Returns LP tokens to the caller.
     public entry fun add_liquidity(
         pool: &mut LiquidityPool_CATL_SUI,
-        catl_coin: Coin<CATL>,
-        sui_coin: Coin<SUI>,
+        mut catl_coin: Coin<CATL>,
+        mut sui_coin: Coin<SUI>,
         min_lp_amount: u64,
         ctx: &mut TxContext
     ) {
@@ -99,31 +103,56 @@ module catalyst::catalyst_swap {
         let sui_reserve = balance::value(&pool.sui_reserve);
         let lp_supply = balance::supply_value(&pool.lp_supply);
 
+        let sender = ctx.sender();
+
         let lp_amount = if (lp_supply == 0) {
-            // Initial deposit — geometric mean minus locked minimum
-            let initial_lp = sqrt(catl_amount * sui_amount);
+            // Initial deposit — geometric mean minus locked minimum.
+            // Both full coins are used to seed the reserves at whatever ratio
+            // the caller chose, since there's no existing price to match yet.
+            let initial_lp = sqrt(catl_amount, sui_amount);
             assert!(initial_lp > MINIMUM_LIQUIDITY, E_INSUFFICIENT_LIQUIDITY);
             let minimum_lp_balance = balance::increase_supply(&mut pool.lp_supply, MINIMUM_LIQUIDITY);
             balance::join(&mut pool.locked_lp, minimum_lp_balance);
+
+            balance::join(&mut pool.catl_reserve, coin::into_balance(catl_coin));
+            balance::join(&mut pool.sui_reserve, coin::into_balance(sui_coin));
+
             initial_lp - MINIMUM_LIQUIDITY
         } else {
-            // Proportional deposit
-            let catl_lp = (catl_amount * lp_supply) / catl_reserve;
-            let sui_lp = (sui_amount * lp_supply) / sui_reserve;
-            if (catl_lp < sui_lp) catl_lp else sui_lp
+            // Proportional deposit — only the amount matching the pool's current
+            // ratio is pulled in; any excess on one side is refunded to the
+            // caller instead of being silently absorbed into the reserves.
+            let catl_lp = mul_div(catl_amount, lp_supply, catl_reserve);
+            let sui_lp = mul_div(sui_amount, lp_supply, sui_reserve);
+
+            let (lp_amount, catl_used, sui_used) = if (catl_lp <= sui_lp) {
+                (catl_lp, catl_amount, mul_div(catl_amount, sui_reserve, catl_reserve))
+            } else {
+                (sui_lp, mul_div(sui_amount, catl_reserve, sui_reserve), sui_amount)
+            };
+            assert!(lp_amount > 0, E_INSUFFICIENT_LIQUIDITY);
+
+            if (catl_used < catl_amount) {
+                transfer::public_transfer(coin::split(&mut catl_coin, catl_amount - catl_used, ctx), sender);
+            };
+            if (sui_used < sui_amount) {
+                transfer::public_transfer(coin::split(&mut sui_coin, sui_amount - sui_used, ctx), sender);
+            };
+
+            balance::join(&mut pool.catl_reserve, coin::into_balance(catl_coin));
+            balance::join(&mut pool.sui_reserve, coin::into_balance(sui_coin));
+
+            lp_amount
         };
 
         assert!(lp_amount >= min_lp_amount, E_SLIPPAGE_EXCEEDED);
-
-        balance::join(&mut pool.catl_reserve, coin::into_balance(catl_coin));
-        balance::join(&mut pool.sui_reserve, coin::into_balance(sui_coin));
 
         let lp_balance = balance::increase_supply(&mut pool.lp_supply, lp_amount);
         let lp_coin = LPCoin {
             id: object::new(ctx),
             balance: lp_balance
         };
-        transfer::transfer(lp_coin, ctx.sender());
+        transfer::transfer(lp_coin, sender);
     }
 
     /// ✅ PUBLIC ENTRY — remove liquidity from the CATL/SUI pool.
@@ -143,8 +172,8 @@ module catalyst::catalyst_swap {
         let sui_reserve = balance::value(&pool.sui_reserve);
         let lp_supply = balance::supply_value(&pool.lp_supply);
 
-        let catl_out = (lp_amount * catl_reserve) / lp_supply;
-        let sui_out = (lp_amount * sui_reserve) / lp_supply;
+        let catl_out = mul_div(lp_amount, catl_reserve, lp_supply);
+        let sui_out = mul_div(lp_amount, sui_reserve, lp_supply);
 
         assert!(catl_out >= min_catl_out && sui_out >= min_sui_out, E_SLIPPAGE_EXCEEDED);
 
@@ -180,8 +209,7 @@ module catalyst::catalyst_swap {
         let sui_reserve = balance::value(&pool.sui_reserve);
 
         // x*y=k with 0.3% fee applied to input
-        let sui_in_with_fee = sui_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let catl_out = (sui_in_with_fee * catl_reserve) / (sui_reserve * BPS_DENOMINATOR + sui_in_with_fee);
+        let catl_out = get_amount_out(sui_amount, sui_reserve, catl_reserve);
 
         assert!(catl_out >= min_catl_out, E_SLIPPAGE_EXCEEDED);
         assert!(catl_out < catl_reserve, E_INSUFFICIENT_LIQUIDITY);
@@ -211,8 +239,7 @@ module catalyst::catalyst_swap {
         let catl_reserve = balance::value(&pool.catl_reserve);
         let sui_reserve = balance::value(&pool.sui_reserve);
 
-        let catl_in_with_fee = catl_amount * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        let sui_out = (catl_in_with_fee * sui_reserve) / (catl_reserve * BPS_DENOMINATOR + catl_in_with_fee);
+        let sui_out = get_amount_out(catl_amount, catl_reserve, sui_reserve);
 
         assert!(sui_out >= min_sui_out, E_SLIPPAGE_EXCEEDED);
         assert!(sui_out < sui_reserve, E_INSUFFICIENT_LIQUIDITY);
@@ -261,23 +288,42 @@ module catalyst::catalyst_swap {
         reserve_in: u64,
         reserve_out: u64
     ): u64 {
-        let amount_in_with_fee = amount_in * (BPS_DENOMINATOR - SWAP_FEE_BPS);
-        (amount_in_with_fee * reserve_out) / (reserve_in * BPS_DENOMINATOR + amount_in_with_fee)
+        get_amount_out(amount_in, reserve_in, reserve_out)
     }
 
     // ======== Helpers ========
 
-    fun sqrt(y: u64): u64 {
-        if (y < 4) {
-            if (y == 0) { 0 } else { 1 }
+    /// (a * b) / c computed in u128 to avoid u64 overflow on the intermediate
+    /// product — reserves and amounts can individually fit u64 while their
+    /// product cannot.
+    fun mul_div(a: u64, b: u64, c: u64): u64 {
+        (((a as u128) * (b as u128)) / (c as u128)) as u64
+    }
+
+    /// Constant-product output with the 0.3% fee applied to the input,
+    /// computed in u128 to avoid overflow on reserve_in * BPS_DENOMINATOR.
+    fun get_amount_out(amount_in: u64, reserve_in: u64, reserve_out: u64): u64 {
+        let amount_in_with_fee = (amount_in as u128) * ((BPS_DENOMINATOR - SWAP_FEE_BPS) as u128);
+        let numerator = amount_in_with_fee * (reserve_out as u128);
+        let denominator = (reserve_in as u128) * (BPS_DENOMINATOR as u128) + amount_in_with_fee;
+        (numerator / denominator) as u64
+    }
+
+    /// Integer sqrt of x*y, computed in u128 so the product of two large u64
+    /// deposit amounts can't overflow before the square root shrinks it back
+    /// down to a u64-sized LP amount.
+    fun sqrt(x: u64, y: u64): u64 {
+        let product = (x as u128) * (y as u128);
+        if (product < 4) {
+            if (product == 0) { 0 } else { 1 }
         } else {
-            let mut z = y;
-            let mut x = y / 2 + 1;
-            while (x < z) {
-                z = x;
-                x = (y / x + x) / 2;
+            let mut z = product;
+            let mut w = product / 2 + 1;
+            while (w < z) {
+                z = w;
+                w = (product / w + w) / 2;
             };
-            z
+            z as u64
         }
     }
 }

@@ -15,6 +15,7 @@ module catalyst::catl {
 
     public struct TokenConfig has key {
         id: UID,
+        treasury_cap: TreasuryCap<CATL>,
         total_supply: u64,
         circulating_supply: u64,
         paused: bool,
@@ -52,50 +53,55 @@ module catalyst::catl {
 
         let config = TokenConfig {
             id: object::new(ctx),
+            treasury_cap,
             total_supply: TOTAL_SUPPLY,
             circulating_supply: 0,
             paused: false,
             treasury_address: sender
         };
 
+        // TreasuryCap is now held exclusively inside TokenConfig — the only way
+        // to mint/burn is through this module's functions, so circulating_supply
+        // can never drift from the real coin supply and the hard cap is enforced
+        // at the contract level, not just by convention.
         transfer::share_object(config);
         transfer::transfer(admin_cap, sender);
-        transfer::public_transfer(treasury_cap, sender);
         transfer::public_transfer(metadata_cap, sender);
     }
 
-    /// Mint CATL tokens.
+    /// Mint CATL tokens. Requires AdminCap.
     /// ✅ Hard cap enforced: will abort with E_MINT_CAP_REACHED if
     ///    circulating_supply + amount would exceed 100,000,000 CATL.
     ///    Once the cap is hit, minting is permanently impossible.
     public entry fun mint(
-        treasury_cap: &mut TreasuryCap<CATL>,
+        _admin: &AdminCap,
         config: &mut TokenConfig,
         amount: u64,
         recipient: address,
         ctx: &mut TxContext
     ) {
         assert!(!config.paused, E_PAUSED);
+        assert!(amount > 0, E_INVALID_AMOUNT);
         // ✅ 100M hard cap — this assert permanently blocks minting beyond the cap
         assert!(
             config.circulating_supply + amount <= TOTAL_SUPPLY,
             E_MINT_CAP_REACHED
         );
 
-        let coins = coin::mint(treasury_cap, amount, ctx);
+        let coins = coin::mint(&mut config.treasury_cap, amount, ctx);
         config.circulating_supply = config.circulating_supply + amount;
 
         transfer::public_transfer(coins, recipient);
     }
 
     public entry fun burn(
-        treasury_cap: &mut TreasuryCap<CATL>,
         config: &mut TokenConfig,
         coin_to_burn: Coin<CATL>
     ) {
         let amount = coin::value(&coin_to_burn);
+        assert!(amount > 0, E_INVALID_AMOUNT);
         config.circulating_supply = config.circulating_supply - amount;
-        coin::burn(treasury_cap, coin_to_burn);
+        coin::burn(&mut config.treasury_cap, coin_to_burn);
     }
 
     public entry fun pause(
