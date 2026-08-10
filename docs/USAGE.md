@@ -1,4 +1,4 @@
-"# Contract Usage Guide
+# Contract Usage Guide
 
 ## Table of Contents
 
@@ -12,13 +12,16 @@
 
 ## Token Operations
 
+The token module's on-chain module name is `catl` (the file is `catalyst_token.move`,
+but `module catalyst::catl { ... }` is what you address in calls).
+
 ### View Token Information
 
 ```bash
 # Get total supply
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function total_supply \
   --args TOKEN_CONFIG_ID \
   --gas-budget 10000000
@@ -26,7 +29,7 @@ sui client call \
 # Get circulating supply
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function circulating_supply \
   --args TOKEN_CONFIG_ID \
   --gas-budget 10000000
@@ -34,10 +37,24 @@ sui client call \
 # Check if paused
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function is_paused \
   --args TOKEN_CONFIG_ID \
   --gas-budget 10000000
+```
+
+### Mint Tokens (Admin Only)
+
+The `TreasuryCap` lives inside the shared `TokenConfig` object — it never leaves
+the module — so minting requires the `AdminCap`, not the treasury cap directly.
+
+```bash
+sui client call \
+  --package PACKAGE_ID \
+  --module catl \
+  --function mint \
+  --args ADMIN_CAP_ID TOKEN_CONFIG_ID AMOUNT RECIPIENT_ADDRESS \
+  --gas-budget 100000000
 ```
 
 ### Transfer CATL Tokens
@@ -52,12 +69,15 @@ sui client transfer \
 
 ### Burn Tokens
 
+Anyone holding a `Coin<CATL>` can burn it — the `TreasuryCap` used internally
+lives in `TokenConfig`, so no capability argument is needed here.
+
 ```bash
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function burn \
-  --args TREASURY_CAP_ID TOKEN_CONFIG_ID CATL_COIN_ID \
+  --args TOKEN_CONFIG_ID CATL_COIN_ID \
   --gas-budget 10000000
 ```
 
@@ -65,37 +85,34 @@ sui client call \
 
 ## Vesting Operations
 
+The deployed vesting contract implements a single 48-month emission schedule
+(83% treasury / 17% team, with a 12-month team cliff) — not per-category
+schedules.
+
 ### Check Vesting Status
 
 ```bash
-# Get vesting info for a category
-# Categories: 0=Presale, 1=Ecosystem, 2=Staking, 3=Team, 4=Treasury, 5=Strategic
+# Returns (total_locked, months_released, team_accumulated, treasury_pending, team_pending)
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_vesting \
-  --function get_schedule_info \
-  --args VAULT_ID CATEGORY_NUMBER 0x6 \
+  --function get_vesting_status \
+  --args VAULT_ID 0x6 \
   --gas-budget 10000000
 ```
 
 ### Release Vested Tokens
 
-```bash
-# Release single category
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_vesting \
-  --function release_category \
-  --args VAULT_ID CATEGORY_NUMBER 0x6 \
-  --gas-budget 50000000
+`release` is permissionless — anyone can trigger it, and payouts always go to
+the treasury/team addresses stored in the vault.
 
-# Release all categories at once
+```bash
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_vesting \
-  --function release_all \
+  --function release \
   --args VAULT_ID 0x6 \
-  --gas-budget 100000000
+  --gas-budget 50000000
 ```
 
 ### Check Locked Balance
@@ -109,47 +126,62 @@ sui client call \
   --gas-budget 10000000
 ```
 
+### Withdraw Dust Remainder (Admin, after month 48)
+
+```bash
+sui client call \
+  --package PACKAGE_ID \
+  --module catalyst_vesting \
+  --function withdraw_remainder \
+  --args VESTING_ADMIN_ID VAULT_ID \
+  --gas-budget 10000000
+```
+
 ---
 
 ## Swap Operations
 
-### Add Liquidity
+The deployed swap contract is a single CATL/SUI constant-product pool — there
+is no built-in support for CATL/USDT or CATL/USDC pools.
 
-#### CATL/SUI Pool
+### Create the Pool (Admin Only, one-time)
 
 ```bash
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function add_liquidity_catl_sui \
+  --function init_pool \
+  --args SWAP_ADMIN_ID \
+  --gas-budget 50000000
+```
+
+### Add Liquidity
+
+```bash
+sui client call \
+  --package PACKAGE_ID \
+  --module catalyst_swap \
+  --function add_liquidity \
   --args POOL_ID CATL_COIN_ID SUI_COIN_ID MIN_LP_AMOUNT \
   --gas-budget 100000000
 ```
 
-#### CATL/USDT Pool
+Note: if your deposit doesn't match the pool's current ratio, only the amount
+needed to match it is pulled in — the rest is returned to you in the same
+transaction.
+
+### Remove Liquidity
 
 ```bash
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function add_liquidity_catl_stable \
-  --type-args USDT_TYPE \
-  --args POOL_ID CATL_COIN_ID USDT_COIN_ID MIN_LP_AMOUNT \
+  --function remove_liquidity \
+  --args POOL_ID LP_COIN_ID MIN_CATL_OUT MIN_SUI_OUT \
   --gas-budget 100000000
 ```
 
 ### Swap Tokens
-
-#### Swap CATL to SUI
-
-```bash
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_swap \
-  --function swap_catl_to_sui \
-  --args POOL_ID CATL_COIN_ID MIN_SUI_OUT \
-  --gas-budget 50000000
-```
 
 #### Swap SUI to CATL
 
@@ -162,68 +194,24 @@ sui client call \
   --gas-budget 50000000
 ```
 
-#### Swap CATL to USDT
+#### Swap CATL to SUI
 
 ```bash
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function swap_catl_to_stable \
-  --type-args USDT_TYPE \
-  --args POOL_ID CATL_COIN_ID MIN_USDT_OUT \
+  --function swap_catl_to_sui \
+  --args POOL_ID CATL_COIN_ID MIN_SUI_OUT \
   --gas-budget 50000000
-```
-
-#### Swap USDT to CATL
-
-```bash
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_swap \
-  --function swap_stable_to_catl \
-  --type-args USDT_TYPE \
-  --args POOL_ID USDT_COIN_ID MIN_CATL_OUT \
-  --gas-budget 50000000
-```
-
-### Remove Liquidity
-
-```bash
-# CATL/SUI Pool
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_swap \
-  --function remove_liquidity_catl_sui \
-  --args POOL_ID LP_COIN_ID MIN_CATL_OUT MIN_SUI_OUT \
-  --gas-budget 100000000
-
-# CATL/USDT Pool
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_swap \
-  --function remove_liquidity_catl_stable \
-  --type-args USDT_TYPE \
-  --args POOL_ID LP_COIN_ID MIN_CATL_OUT MIN_USDT_OUT \
-  --gas-budget 100000000
 ```
 
 ### View Pool Reserves
 
 ```bash
-# CATL/SUI Pool
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function get_catl_sui_reserves \
-  --args POOL_ID \
-  --gas-budget 10000000
-
-# CATL/STABLE Pool
-sui client call \
-  --package PACKAGE_ID \
-  --module catalyst_swap \
-  --function get_catl_stable_reserves \
-  --type-args USDT_TYPE \
+  --function get_reserves \
   --args POOL_ID \
   --gas-budget 10000000
 ```
@@ -249,7 +237,7 @@ sui client call \
 # Pause token operations
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function pause \
   --args ADMIN_CAP_ID TOKEN_CONFIG_ID \
   --gas-budget 10000000
@@ -257,7 +245,7 @@ sui client call \
 # Unpause token operations
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function unpause \
   --args ADMIN_CAP_ID TOKEN_CONFIG_ID \
   --gas-budget 10000000
@@ -265,7 +253,7 @@ sui client call \
 # Update treasury address
 sui client call \
   --package PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function update_treasury \
   --args ADMIN_CAP_ID TOKEN_CONFIG_ID NEW_ADDRESS \
   --gas-budget 10000000
@@ -290,11 +278,19 @@ sui client call \
   --args VESTING_ADMIN_ID VAULT_ID \
   --gas-budget 10000000
 
-# Update treasury
+# Update treasury address
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_vesting \
   --function update_treasury \
+  --args VESTING_ADMIN_ID VAULT_ID NEW_ADDRESS \
+  --gas-budget 10000000
+
+# Update team address
+sui client call \
+  --package PACKAGE_ID \
+  --module catalyst_vesting \
+  --function update_team_address \
   --args VESTING_ADMIN_ID VAULT_ID NEW_ADDRESS \
   --gas-budget 10000000
 ```
@@ -302,20 +298,19 @@ sui client call \
 ### Swap Admin
 
 ```bash
-# Pause CATL/SUI pool
+# Pause the CATL/SUI pool
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function pause_catl_sui_pool \
+  --function pause_pool \
   --args SWAP_ADMIN_ID POOL_ID \
   --gas-budget 10000000
 
-# Pause CATL/STABLE pool
+# Unpause the CATL/SUI pool
 sui client call \
   --package PACKAGE_ID \
   --module catalyst_swap \
-  --function pause_catl_stable_pool \
-  --type-args USDT_TYPE \
+  --function unpause_pool \
   --args SWAP_ADMIN_ID POOL_ID \
   --gas-budget 10000000
 ```
@@ -341,7 +336,7 @@ async function swapCatlToSui(
   signer: any
 ) {
   const tx = new TransactionBlock();
-  
+
   tx.moveCall({
     target: `${packageId}::catalyst_swap::swap_catl_to_sui`,
     arguments: [
@@ -350,7 +345,7 @@ async function swapCatlToSui(
       tx.pure(minSuiOut)
     ]
   });
-  
+
   const result = await client.signAndExecuteTransactionBlock({
     signer,
     transactionBlock: tx,
@@ -359,24 +354,19 @@ async function swapCatlToSui(
       showObjectChanges: true
     }
   });
-  
+
   return result;
 }
 
 // Example: Check vesting status
-async function getVestingInfo(
-  packageId: string,
-  vaultId: string,
-  category: number
-) {
+async function getVestingStatus(packageId: string, vaultId: string) {
   const result = await client.devInspectTransactionBlock({
     transactionBlock: (() => {
       const tx = new TransactionBlock();
       tx.moveCall({
-        target: `${packageId}::catalyst_vesting::get_schedule_info`,
+        target: `${packageId}::catalyst_vesting::get_vesting_status`,
         arguments: [
           tx.object(vaultId),
-          tx.pure(category),
           tx.object('0x6') // Clock
         ]
       });
@@ -384,7 +374,7 @@ async function getVestingInfo(
     })(),
     sender: '0x0000000000000000000000000000000000000000000000000000000000000000'
   });
-  
+
   return result;
 }
 
@@ -392,21 +382,22 @@ async function getVestingInfo(
 async function addLiquidity(
   packageId: string,
   poolId: string,
+  catlCoinObject: string,
   catlAmount: number,
   suiAmount: number,
   minLpAmount: number,
   signer: any
 ) {
   const tx = new TransactionBlock();
-  
+
   // Split coins
-  const [catlCoin] = tx.splitCoins(tx.object('CATL_COIN_OBJECT'), [
+  const [catlCoin] = tx.splitCoins(tx.object(catlCoinObject), [
     tx.pure(catlAmount)
   ]);
   const [suiCoin] = tx.splitCoins(tx.gas, [tx.pure(suiAmount)]);
-  
+
   tx.moveCall({
-    target: `${packageId}::catalyst_swap::add_liquidity_catl_sui`,
+    target: `${packageId}::catalyst_swap::add_liquidity`,
     arguments: [
       tx.object(poolId),
       catlCoin,
@@ -414,12 +405,12 @@ async function addLiquidity(
       tx.pure(minLpAmount)
     ]
   });
-  
+
   const result = await client.signAndExecuteTransactionBlock({
     signer,
     transactionBlock: tx
   });
-  
+
   return result;
 }
 ```
@@ -435,30 +426,29 @@ config = SuiConfig.default_config()
 client = SyncClient(config)
 
 # Example: Release vested tokens
-def release_vesting(package_id, vault_id, category):
+def release_vesting(package_id, vault_id):
     txn = SyncTransaction(client)
-    
+
     txn.move_call(
-        target=f\"{package_id}::catalyst_vesting::release_category\",
+        target=f"{package_id}::catalyst_vesting::release",
         arguments=[
             vault_id,
-            category,
-            \"0x6\"  # Clock object
+            "0x6"  # Clock object
         ]
     )
-    
+
     result = txn.execute(gas_budget=50_000_000)
     return result
 
 # Example: Get pool reserves
 def get_pool_reserves(package_id, pool_id):
     txn = SyncTransaction(client)
-    
+
     result = txn.inspect_transaction_block(
-        target=f\"{package_id}::catalyst_swap::get_catl_sui_reserves\",
+        target=f"{package_id}::catalyst_swap::get_reserves",
         arguments=[pool_id]
     )
-    
+
     return result
 ```
 
@@ -470,10 +460,10 @@ import { TransactionBlock } from '@mysten/sui.js/transactions';
 
 function SwapComponent() {
   const { signAndExecuteTransactionBlock } = useWalletKit();
-  
-  const handleSwap = async (catlAmount, minSuiOut) => {
+
+  const handleSwap = async (catlCoinId, minSuiOut) => {
     const tx = new TransactionBlock();
-    
+
     tx.moveCall({
       target: `${PACKAGE_ID}::catalyst_swap::swap_catl_to_sui`,
       arguments: [
@@ -482,7 +472,7 @@ function SwapComponent() {
         tx.pure(minSuiOut)
       ]
     });
-    
+
     try {
       const result = await signAndExecuteTransactionBlock({
         transactionBlock: tx,
@@ -490,15 +480,15 @@ function SwapComponent() {
           showEffects: true
         }
       });
-      
+
       console.log('Swap successful:', result);
     } catch (error) {
       console.error('Swap failed:', error);
     }
   };
-  
+
   return (
-    <button onClick={() => handleSwap(1000000000, 500000)}>
+    <button onClick={() => handleSwap('0xCATL_COIN_ID', 500000)}>
       Swap CATL to SUI
     </button>
   );
@@ -557,4 +547,3 @@ For questions or issues:
 - GitHub Issues
 - Discord Community
 - Twitter: @CatalystToken
-"

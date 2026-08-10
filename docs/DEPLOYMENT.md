@@ -91,12 +91,15 @@ chmod +x deployment/initialize.sh
 ```
 
 You'll need to provide:
-1. **TreasuryCap Object ID** - For minting tokens
-2. **SwapAdmin Object ID** - For creating pools
-3. **VestingAdmin Object ID** - For vesting setup
-4. **VestingVault Object ID** - Shared vesting object
-5. **CATL Coin Object ID** - Minted tokens
-6. **Clock Object ID** - Use `0x6` (Sui's shared clock)
+1. **AdminCap Object ID** - For minting tokens (the TreasuryCap itself lives
+   inside the shared `TokenConfig` object and is never used directly)
+2. **TokenConfig Object ID** - Shared token config object
+3. **SwapAdmin Object ID** - For creating the CATL/SUI pool
+4. **VestingAdmin Object ID** - For vesting setup
+5. **VestingVault Object ID** - Shared vesting object
+6. **CATL Coin Object ID** - A coin holding exactly 90,000,000 CATL for the vault
+7. **Team wallet address** - Receives the 17% team share
+8. **Clock Object ID** - Use `0x6` (Sui's shared clock)
 
 ## Manual Deployment (Alternative)
 
@@ -110,53 +113,44 @@ sui client publish --gas-budget 500000000
 
 ### 2. Mint Initial Supply
 
+`mint` requires the `AdminCap` — the `TreasuryCap` itself lives inside the
+shared `TokenConfig` object and is never passed around directly.
+
 ```bash
 sui client call \
   --package YOUR_PACKAGE_ID \
-  --module catalyst_token \
+  --module catl \
   --function mint \
-  --args TREASURY_CAP_ID TOKEN_CONFIG_ID 100000000000000000 YOUR_ADDRESS \
+  --args ADMIN_CAP_ID TOKEN_CONFIG_ID 100000000000000000 YOUR_ADDRESS \
   --gas-budget 100000000
 ```
 
-### 3. Create Swap Pools
+### 3. Create the Swap Pool
+
+The deployed swap contract supports a single CATL/SUI pool. `init_pool`
+requires the `SwapAdmin` cap so only the deployer can create the canonical
+pool object.
 
 ```bash
-# CATL/SUI Pool
 sui client call \
   --package YOUR_PACKAGE_ID \
   --module catalyst_swap \
-  --function create_catl_sui_pool \
-  --args SWAP_ADMIN_ID \
-  --gas-budget 50000000
-
-# CATL/USDT Pool (replace USDT_TYPE with actual USDT coin type)
-sui client call \
-  --package YOUR_PACKAGE_ID \
-  --module catalyst_swap \
-  --function create_catl_stable_pool \
-  --type-args USDT_TYPE \
-  --args SWAP_ADMIN_ID \
-  --gas-budget 50000000
-
-# CATL/USDC Pool (replace USDC_TYPE with actual USDC coin type)
-sui client call \
-  --package YOUR_PACKAGE_ID \
-  --module catalyst_swap \
-  --function create_catl_stable_pool \
-  --type-args USDC_TYPE \
+  --function init_pool \
   --args SWAP_ADMIN_ID \
   --gas-budget 50000000
 ```
 
 ### 4. Initialize Vesting
 
+The vault expects exactly 90,000,000 CATL (`90000000000000000` base units) —
+`initialize` will abort if the deposited coin doesn't match.
+
 ```bash
 sui client call \
   --package YOUR_PACKAGE_ID \
   --module catalyst_vesting \
-  --function initialize_schedules \
-  --args VESTING_ADMIN_ID VESTING_VAULT_ID CATL_COIN_ID 0x6 \
+  --function initialize \
+  --args VESTING_ADMIN_ID VESTING_VAULT_ID CATL_COIN_ID TEAM_ADDRESS 0x6 \
   --gas-budget 100000000
 ```
 
@@ -198,7 +192,8 @@ sui client object VESTING_VAULT_ID
 
 Expected:
 - `initialized: true`
-- `locked_balance: 100000000000000000`
+- `locked_balance: 90000000000000000` (90M CATL — the remaining 10M presale
+  allocation is released at TGE outside this contract)
 
 ### 3. Check Swap Pools
 

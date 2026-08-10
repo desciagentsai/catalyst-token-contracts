@@ -196,11 +196,12 @@ async function previewSwap(
 // 1. sui client publish --network testnet
 //    → copy PACKAGE_ID from output
 //
-// 2. Call init_pool() once (no args):
+// 2. Call init_pool() once (requires the SwapAdmin cap emitted at publish):
 //    sui client call \
 //      --package $PACKAGE_ID \
 //      --module catalyst_swap \
 //      --function init_pool \
+//      --args $SWAP_ADMIN_ID \
 //      --network testnet
 //    → copy the new shared object ID → POOL_ID
 //

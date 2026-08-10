@@ -54,13 +54,18 @@ module catalyst::catalyst_vesting {
     /// Total vesting duration
     const TOTAL_MONTHS: u64 = 48;
 
+    /// Expected deposit at initialize() — 90,000,000 CATL (9 decimals)
+    const VAULT_ALLOCATION: u64 = 90_000_000_000_000_000;
+
     // ======== Error Codes ========
 
     const E_NOT_ADMIN: u64 = 1;
     const E_NOT_STARTED: u64 = 2;
+    const E_PAUSED: u64 = 3;
     const E_NOTHING_TO_RELEASE: u64 = 4;
     const E_ALREADY_INITIALIZED: u64 = 5;
     const E_VESTING_NOT_COMPLETE: u64 = 6;
+    const E_WRONG_DEPOSIT_AMOUNT: u64 = 7;
 
     // ======== Objects ========
 
@@ -121,6 +126,7 @@ module catalyst::catalyst_vesting {
         _ctx: &mut TxContext
     ) {
         assert!(!vault.initialized, E_ALREADY_INITIALIZED);
+        assert!(coin::value(&tokens) == VAULT_ALLOCATION, E_WRONG_DEPOSIT_AMOUNT);
 
         let token_balance = coin::into_balance(tokens);
         balance::join(&mut vault.locked_balance, token_balance);
@@ -147,7 +153,7 @@ module catalyst::catalyst_vesting {
         clock: &Clock,
         ctx: &mut TxContext
     ) {
-        assert!(!vault.paused, E_NOT_ADMIN);
+        assert!(!vault.paused, E_PAUSED);
         assert!(vault.initialized, E_NOT_STARTED);
 
         let current_time = clock::timestamp_ms(clock);
